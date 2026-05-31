@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 description = "Streaming async ZIP archive writer with per-file deflate compression"
-license = "MIT"
-repository = "https://github.com/sigoden/async-deflate-zip"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+authors = ["sigoden <sigoden@gmail.com>"]
+documentation = "https://docs.rs/async_deflate_zip/"
+homepage = "https://github.com/sigoden/async-deflate-zip"
+categories = ["asynchronous", "compression"]
+keywords = ["async", "zip", "archive", "tokio"]
+repository = "https://github.com/sigoden/async-deflate-zip"
 
 [dependencies]
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt"] }

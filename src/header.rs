@@ -66,6 +66,9 @@ pub(crate) const VERSION_ZIP64: u16 = 45;
 /// Maximum value that fits in a ZIP 32-bit size/offset field.
 pub(crate) const U32_MAX: u64 = u32::MAX as u64;
 
+/// Data Descriptor signature: `PK\x07\x08` (`0x08074b50`).
+pub(crate) const DD_SIG: u32 = 0x08074b50;
+
 // === Helper: write little-endian integers ===
 
 /// Write a `u16` in little-endian order into a byte buffer.
@@ -101,21 +104,18 @@ pub(crate) fn ms_dos_datetime() -> (u16, u16) {
 
 /// Convert a `SystemTime` to MS-DOS date/time format.
 ///
-/// Clamps year to the valid MS-DOS range [1980, 2107].
+/// Converts the UTC input to local time using the `time` crate before packing
+/// into MS-DOS format. Clamps year to the valid MS-DOS range [1980, 2107].
 pub(crate) fn system_time_to_ms_dos(t: std::time::SystemTime) -> (u16, u16) {
-    let d = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = d / 86400;
-    let secs = d % 86400;
-    let hour = (secs / 3600) as u16;
-    let minute = ((secs % 3600) / 60) as u16;
-    let second = (secs % 60 / 2) as u16;
-
-    let (y, m, day) = epoch_days_to_date(days as i64);
-    let y = y.clamp(1980, 2107);
-    let date = ((y - 1980) as u16) << 9 | (m as u16) << 5 | day;
+    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let dt = time::OffsetDateTime::from(t).to_offset(local_offset);
+    let y = dt.year().clamp(1980, 2107);
+    let m = u8::from(dt.month()) as u16;
+    let day = dt.day() as u16;
+    let hour = dt.hour() as u16;
+    let minute = dt.minute() as u16;
+    let second = (dt.second() / 2) as u16;
+    let date = ((y - 1980) as u16) << 9 | m << 5 | day;
     let time = hour << 11 | minute << 5 | second;
     (time, date)
 }
@@ -123,55 +123,15 @@ pub(crate) fn system_time_to_ms_dos(t: std::time::SystemTime) -> (u16, u16) {
 /// Build the Info-ZIP extended timestamp extra field (ID `0x5455`) with mtime only.
 ///
 /// Format: header_id (2) + data_size (2) + flags (1) + mtime (4) = 9 bytes.
+/// The mtime field is 32-bit, so values exceeding `u32::MAX` (2106-02-07) are
+/// clamped to `u32::MAX` to avoid silent wrap-around.
 pub(crate) fn build_extended_timestamp_extra(mtime: u64) -> Vec<u8> {
     let mut buf = Vec::with_capacity(9);
     put_u16(&mut buf, 0x5455);
     put_u16(&mut buf, 5);
     put_u8(&mut buf, 1);
-    put_u32(&mut buf, mtime as u32);
+    put_u32(&mut buf, mtime.min(u32::MAX as u64) as u32);
     buf
-}
-
-/// Convert days since Unix epoch to (year, month, day) in the Gregorian calendar.
-pub(crate) fn epoch_days_to_date(mut days: i64) -> (i64, i64, u16) {
-    let mut y = 1970i64;
-    loop {
-        let yd = if is_leap(y) { 366 } else { 365 };
-        if days < yd {
-            break;
-        }
-        days -= yd;
-        y += 1;
-    }
-    let leap = is_leap(y);
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut m = 1i64;
-    for &md in &mdays {
-        if days < md {
-            break;
-        }
-        days -= md;
-        m += 1;
-    }
-    (y, m, (days + 1) as u16)
-}
-
-/// Return `true` if `year` is a leap year in the Gregorian calendar.
-pub(crate) fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
 // === Header structures ===
@@ -200,13 +160,17 @@ pub(crate) struct LocalFileHeader {
 impl LocalFileHeader {
     pub(crate) fn new(name: &str, method: u16) -> Self {
         let (time, date) = ms_dos_datetime();
+        let mut flags = FLAG_DATA_DESC;
+        if !name.is_ascii() {
+            flags |= 1 << 11; // EFS / Language encoding flag (bit 11)
+        }
         Self {
-            version_needed: if method == METHOD_DEFLATE {
-                VERSION_DEFLATE
-            } else {
-                10
+            version_needed: match method {
+                METHOD_STORED => VERSION_STORED,
+                METHOD_DEFLATE => VERSION_DEFLATE,
+                _ => VERSION_DEFLATE,
             },
-            flags: FLAG_DATA_DESC,
+            flags,
             method,
             time,
             date,
@@ -268,13 +232,15 @@ pub(crate) struct DataDescriptor {
 impl DataDescriptor {
     pub(crate) fn serialize(&self) -> Vec<u8> {
         if self.zip64 {
-            let mut buf = Vec::with_capacity(20);
+            let mut buf = Vec::with_capacity(24);
+            put_u32(&mut buf, DD_SIG);
             put_u32(&mut buf, self.crc32);
             put_u64(&mut buf, self.compressed_size);
             put_u64(&mut buf, self.uncompressed_size);
             buf
         } else {
-            let mut buf = Vec::with_capacity(12);
+            let mut buf = Vec::with_capacity(16);
+            put_u32(&mut buf, DD_SIG);
             put_u32(&mut buf, self.crc32);
             put_u32(&mut buf, self.compressed_size as u32);
             put_u32(&mut buf, self.uncompressed_size as u32);
@@ -334,13 +300,13 @@ impl CentralDirEntry {
             || self.local_header_offset > U32_MAX;
 
         let extra = if use_zip64 {
-            let mut z64 = Self::zip64_extra(
+            let mut extra = self.extra.clone();
+            extra.extend(Self::zip64_extra(
                 self.compressed_size,
                 self.uncompressed_size,
                 self.local_header_offset,
-            );
-            z64.extend_from_slice(&self.extra);
-            z64
+            ));
+            extra
         } else {
             self.extra.clone()
         };
@@ -547,6 +513,13 @@ mod tests {
         assert_eq!(&data[0..4], &0x04034b50u32.to_le_bytes());
         assert_eq!(&data[8..10], &METHOD_DEFLATE.to_le_bytes());
         assert!(data[6] & (1 << 3) != 0);
+        assert_eq!(
+            u16::from_le_bytes(data[4..6].try_into().unwrap()),
+            20,
+            "expected VERSION_DEFLATE"
+        );
+        let extra_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
+        assert_eq!(extra_len, 0, "expected no extra field, got {extra_len}");
     }
 
     #[test]
@@ -558,10 +531,11 @@ mod tests {
             zip64: false,
         };
         let data = dd.serialize();
-        assert_eq!(data.len(), 12);
-        assert_eq!(&data[0..4], &0x12345678u32.to_le_bytes());
-        assert_eq!(&data[4..8], &100u32.to_le_bytes());
-        assert_eq!(&data[8..12], &200u32.to_le_bytes());
+        assert_eq!(data.len(), 16);
+        assert_eq!(&data[0..4], &0x08074b50u32.to_le_bytes());
+        assert_eq!(&data[4..8], &0x12345678u32.to_le_bytes());
+        assert_eq!(&data[8..12], &100u32.to_le_bytes());
+        assert_eq!(&data[12..16], &200u32.to_le_bytes());
     }
 
     #[test]
@@ -613,6 +587,41 @@ mod tests {
     }
 
     #[test]
+    fn test_data_descriptor_zip64() {
+        let dd = DataDescriptor {
+            crc32: 0x12345678,
+            compressed_size: 5_000_000_000,
+            uncompressed_size: 10_000_000_000,
+            zip64: true,
+        };
+        let data = dd.serialize();
+        assert_eq!(data.len(), 24);
+        assert_eq!(&data[0..4], &0x08074b50u32.to_le_bytes());
+        assert_eq!(&data[4..8], &0x12345678u32.to_le_bytes());
+        assert_eq!(&data[8..16], &5_000_000_000u64.to_le_bytes());
+        assert_eq!(&data[16..24], &10_000_000_000u64.to_le_bytes());
+    }
+
+    #[test]
+    fn test_data_descriptor_zip64_small_sizes() {
+        // Simulate a small file at local_header_offset > U32_MAX.
+        // Sizes fit in 32 bits, but zip64=true (triggered by offset in close()).
+        // DD must still be 24 bytes with 8-byte size fields.
+        let dd = DataDescriptor {
+            crc32: 0xDEADBEEF,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            zip64: true,
+        };
+        let data = dd.serialize();
+        assert_eq!(data.len(), 24);
+        assert_eq!(&data[0..4], &0x08074b50u32.to_le_bytes());
+        assert_eq!(&data[4..8], &0xDEADBEEFu32.to_le_bytes());
+        assert_eq!(&data[8..16], &100u64.to_le_bytes());
+        assert_eq!(&data[16..24], &200u64.to_le_bytes());
+    }
+
+    #[test]
     fn test_eocdr() {
         let eocdr = Eocdr {
             total_entries: 10,
@@ -625,6 +634,53 @@ mod tests {
         assert_eq!(&data[10..12], &10u16.to_le_bytes());
         assert_eq!(&data[12..16], &5000u32.to_le_bytes());
         assert_eq!(&data[16..20], &10000u32.to_le_bytes());
+    }
+
+    #[test]
+    fn test_eocdr_zip64() {
+        // ZIP64 sentinels: entries > 0xFFFF, cd_size/cd_offset > U32_MAX
+        let eocdr = Eocdr {
+            total_entries: 70000,
+            cd_size: 5_000_000_000,
+            cd_offset: 6_000_000_000,
+        };
+        let data = eocdr.serialize();
+        assert_eq!(&data[8..10], &0xFFFFu16.to_le_bytes());
+        assert_eq!(&data[10..12], &0xFFFFu16.to_le_bytes());
+        assert_eq!(&data[12..16], &u32::MAX.to_le_bytes());
+        assert_eq!(&data[16..20], &u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn test_zip64_eocdr() {
+        let z64 = Zip64Eocdr {
+            total_entries: 70000,
+            cd_size: 5_000_000_000,
+            cd_offset: 6_000_000_000,
+        };
+        let data = z64.serialize();
+        assert_eq!(data.len(), 56);
+        assert_eq!(&data[0..4], &0x06064b50u32.to_le_bytes());
+        assert_eq!(&data[4..12], &44u64.to_le_bytes()); // size of remaining record
+        assert_eq!(&data[12..14], &VERSION_ZIP64.to_le_bytes());
+        assert_eq!(&data[14..16], &VERSION_ZIP64.to_le_bytes());
+        assert_eq!(&data[24..32], &70000u64.to_le_bytes()); // total entries
+        assert_eq!(&data[32..40], &70000u64.to_le_bytes()); // same
+        assert_eq!(&data[40..48], &5_000_000_000u64.to_le_bytes());
+        assert_eq!(&data[48..56], &6_000_000_000u64.to_le_bytes());
+    }
+
+    #[test]
+    fn test_zip64_eocdr_locator() {
+        let loc = Zip64EocdrLocator {
+            eocdr64_offset: 6_000_000_000,
+        };
+        let data = loc.serialize();
+        assert_eq!(data.len(), 20);
+        assert_eq!(&data[0..4], &0x07064b50u32.to_le_bytes());
+        assert_eq!(&data[4..8], &0u32.to_le_bytes()); // disk number
+        assert_eq!(&data[8..16], &6_000_000_000u64.to_le_bytes());
+        assert_eq!(&data[16..20], &1u32.to_le_bytes()); // total disks
     }
 
     #[test]
@@ -665,10 +721,14 @@ mod tests {
         let extra_start = 46 + name_len;
         let extra_data = &data[extra_start..extra_start + extra_len];
 
-        // Find ZIP64 extra field header (0x0001)
-        assert_eq!(
-            u16::from_le_bytes(extra_data[0..2].try_into().unwrap()),
-            0x0001
+        // Find ZIP64 extra field header (0x0001) — should appear after UT
+        let has_z64 = extra_data.windows(4).any(|w| {
+            let tag = u16::from_le_bytes(w[0..2].try_into().unwrap());
+            tag == 0x0001
+        });
+        assert!(
+            has_z64,
+            "ZIP64 extra (0x0001) missing from serialized extra field"
         );
 
         // Find extended timestamp extra field header (0x5455)
@@ -676,6 +736,17 @@ mod tests {
         assert!(
             has_ts,
             "extended timestamp extra (0x5455) missing from serialized extra field"
+        );
+
+        // ZIP64 should appear AFTER timestamp extra in the stream
+        let z64_pos = extra_data
+            .windows(2)
+            .position(|w| w == &[0x01, 0x00])
+            .unwrap();
+        let ts_pos = extra_data.windows(2).position(|w| w == b"UT").unwrap();
+        assert!(
+            ts_pos < z64_pos,
+            "expected UT extra before ZIP64 extra, but UT at {ts_pos}, ZIP64 at {z64_pos}"
         );
     }
 

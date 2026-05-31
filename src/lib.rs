@@ -10,7 +10,6 @@
 //! The crate is organized into four modules:
 //!
 //! - [`ZipWriter`] — Streaming [`ZipWriter`] and per-entry [`EntryWriter`]
-//! - [`compress_dir`] — Convenience function for compressing a directory tree
 //! - [`CompressionLevel`] — Deflate compression level (0-9)
 //!
 //! # Quick Start
@@ -31,12 +30,10 @@
 //! # }
 //! ```
 
-mod compress;
 pub(crate) mod header;
 mod types;
 mod writer;
 
-pub use compress::compress_dir;
 pub use types::CompressionLevel;
 pub use writer::EntryWriter;
 pub use writer::ZipWriter;

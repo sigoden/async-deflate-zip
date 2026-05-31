@@ -30,12 +30,6 @@
 //! zip.finalize().await.unwrap();
 //! # }
 //! ```
-//!
-//! # Dependencies
-//!
-//! - `async-compression` (tokio + deflate) — DEFLATE compression
-//! - `crc32fast` — Fast CRC-32 checksums for ZIP data integrity
-//! - `tokio` — Async I/O runtime
 
 mod compress;
 pub(crate) mod header;

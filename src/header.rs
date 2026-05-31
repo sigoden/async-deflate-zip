@@ -52,6 +52,9 @@ pub(crate) const FLAG_DATA_DESC: u16 = 1 << 3;
 /// Version needed: 2.0 — supports DEFLATE compression.
 pub(crate) const VERSION_DEFLATE: u16 = 20;
 
+/// Version made by: Unix host OS (upper byte = 3) + deflate support (lower byte = 20).
+pub(crate) const VERSION_UNIX: u16 = (3 << 8) | VERSION_DEFLATE;
+
 /// Version needed: 4.5 — supports ZIP64 extensions.
 pub(crate) const VERSION_ZIP64: u16 = 45;
 
@@ -75,6 +78,11 @@ pub(crate) fn put_u64(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
 
+/// Write a `u8` into a byte buffer.
+pub(crate) fn put_u8(buf: &mut Vec<u8>, v: u8) {
+    buf.push(v);
+}
+
 // === MS-DOS date/time ===
 
 /// Return the current time and date in MS-DOS format.
@@ -83,7 +91,14 @@ pub(crate) fn put_u64(buf: &mut Vec<u8>, v: u64) {
 /// - **Time**: hours (5 bits), minutes (6 bits), seconds/2 (5 bits)
 /// - **Date**: year-1980 (7 bits), month (4 bits), day (5 bits)
 pub(crate) fn ms_dos_datetime() -> (u16, u16) {
-    let d = std::time::SystemTime::now()
+    system_time_to_ms_dos(std::time::SystemTime::now())
+}
+
+/// Convert a `SystemTime` to MS-DOS date/time format.
+///
+/// Clamps year to the valid MS-DOS range [1980, 2107].
+pub(crate) fn system_time_to_ms_dos(t: std::time::SystemTime) -> (u16, u16) {
+    let d = t
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
@@ -94,9 +109,22 @@ pub(crate) fn ms_dos_datetime() -> (u16, u16) {
     let second = (secs % 60 / 2) as u16;
 
     let (y, m, day) = epoch_days_to_date(days as i64);
+    let y = y.clamp(1980, 2107);
     let date = ((y - 1980) as u16) << 9 | (m as u16) << 5 | day;
     let time = hour << 11 | minute << 5 | second;
     (time, date)
+}
+
+/// Build the Info-ZIP extended timestamp extra field (ID `0x5455`) with mtime only.
+///
+/// Format: header_id (2) + data_size (2) + flags (1) + mtime (4) = 9 bytes.
+pub(crate) fn build_extended_timestamp_extra(mtime: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(9);
+    put_u16(&mut buf, 0x5455);
+    put_u16(&mut buf, 5);
+    put_u8(&mut buf, 1);
+    put_u32(&mut buf, mtime as u32);
+    buf
 }
 
 /// Convert days since Unix epoch to (year, month, day) in the Gregorian calendar.
@@ -264,6 +292,9 @@ pub(crate) struct CentralDirEntry {
     pub(crate) extra: Vec<u8>,
     /// Offset of this entry's Local File Header from the start of the archive.
     pub(crate) local_header_offset: u64,
+    /// External file attributes, host-OS dependent.
+    /// For Unix (version_made_by upper byte = 3), upper 16 bits hold st_mode.
+    pub(crate) external_file_attributes: u32,
 }
 
 impl CentralDirEntry {
@@ -319,7 +350,7 @@ impl CentralDirEntry {
         put_u16(&mut buf, 0); // file comment length
         put_u16(&mut buf, 0); // disk number start
         put_u16(&mut buf, 0); // internal file attributes
-        put_u32(&mut buf, 0); // external file attributes
+        put_u32(&mut buf, self.external_file_attributes);
         put_u32(
             &mut buf,
             if use_zip64 {
@@ -509,6 +540,7 @@ mod tests {
             name: b"test.txt".to_vec(),
             extra: Vec::new(),
             local_header_offset: 0,
+            external_file_attributes: 0,
         };
         let data = cde.serialize();
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());
@@ -532,6 +564,7 @@ mod tests {
             name: b"big_file.bin".to_vec(),
             extra: Vec::new(),
             local_header_offset: 0,
+            external_file_attributes: 0,
         };
         let data = cde.serialize();
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());

@@ -46,7 +46,8 @@ pub async fn compress_dir(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> std:
 /// Recursively walk a directory and add all entries to the ZIP archive.
 ///
 /// Internal helper. Visits every file and subdirectory, adding each to
-/// the `ZipWriter` with paths relative to `base`.
+/// the `ZipWriter` with paths relative to `base`. Preserves file modification
+/// times and Unix permissions when available.
 async fn compress_dir_recursive<W: AsyncWrite + Unpin>(
     zip: &mut ZipWriter<W>,
     base: &Path,
@@ -62,8 +63,17 @@ async fn compress_dir_recursive<W: AsyncWrite + Unpin>(
             zip.append_directory(&format!("{}/", name_str)).await?;
             Box::pin(compress_dir_recursive(zip, base, &path)).await?;
         } else {
+            let metadata = entry.metadata().await?;
             let mut file = tokio::fs::File::open(&path).await?;
             let mut entry = zip.append_file(&name_str).await?;
+            if let Ok(mtime) = metadata.modified() {
+                entry.set_mtime(mtime);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                entry.set_permissions(metadata.permissions().mode() & 0o777);
+            }
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.close().await?;
         }

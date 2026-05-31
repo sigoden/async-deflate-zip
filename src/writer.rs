@@ -67,13 +67,39 @@ pub(crate) struct StoredEntry {
     uncompressed_size: u64,
     local_header_offset: u64,
     is_directory: bool,
+    mtime: Option<(u16, u16)>,
+    unix_mtime: Option<u64>,
+    unix_permissions: Option<u32>,
 }
 
 impl StoredEntry {
     fn to_central_dir_entry(&self) -> header::CentralDirEntry {
-        let (time, date) = header::ms_dos_datetime();
+        let (time, date) = self.mtime.unwrap_or_else(header::ms_dos_datetime);
+
+        let has_unix_attrs = self.unix_permissions.is_some() || self.unix_mtime.is_some();
+        let version_made_by = if has_unix_attrs {
+            header::VERSION_UNIX
+        } else {
+            header::VERSION_DEFLATE
+        };
+
+        let extra = match self.unix_mtime {
+            Some(ts) => header::build_extended_timestamp_extra(ts),
+            None => Vec::new(),
+        };
+
+        let file_type_bit: u32 = if self.is_directory {
+            0o040000
+        } else {
+            0o100000
+        };
+        let external_file_attributes = self
+            .unix_permissions
+            .map(|mode| (mode | file_type_bit) << 16)
+            .unwrap_or(0);
+
         header::CentralDirEntry {
-            version_made_by: header::VERSION_DEFLATE,
+            version_made_by,
             version_needed: header::VERSION_DEFLATE,
             flags: header::FLAG_DATA_DESC,
             method: if self.is_directory {
@@ -87,8 +113,9 @@ impl StoredEntry {
             compressed_size: self.compressed_size,
             uncompressed_size: self.uncompressed_size,
             name: self.name.as_bytes().to_vec(),
-            extra: Vec::new(),
+            extra,
             local_header_offset: self.local_header_offset,
+            external_file_attributes,
         }
     }
 }
@@ -203,6 +230,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             uncompressed_size: 0,
             local_header_offset: offset,
             name: name.to_string(),
+            mtime: None,
+            unix_permissions: None,
         })
     }
 
@@ -252,6 +281,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             uncompressed_size: 0,
             local_header_offset: offset,
             is_directory: true,
+            mtime: None,
+            unix_mtime: None,
+            unix_permissions: None,
         });
         self.inner = Some(inner);
         Ok(())
@@ -343,10 +375,31 @@ pin_project_lite::pin_project! {
         uncompressed_size: u64,
         local_header_offset: u64,
         name: String,
+        mtime: Option<std::time::SystemTime>,
+        unix_permissions: Option<u32>,
     }
 }
 
 impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
+    /// Set the modification time for this entry.
+    ///
+    /// The timestamp is stored in the Central Directory using MS-DOS format
+    /// and as an extended timestamp extra field (0x5455).
+    pub fn set_mtime(&mut self, mtime: std::time::SystemTime) -> &mut Self {
+        self.mtime = Some(mtime);
+        self
+    }
+
+    /// Set Unix file permissions for this entry.
+    ///
+    /// Provide permission bits only (e.g., `0o644`, `0o755`). The crate
+    /// automatically adds the file type bit (`S_IFREG` for files,
+    /// `S_IFDIR` for directories).
+    pub fn set_permissions(&mut self, mode: u32) -> &mut Self {
+        self.unix_permissions = Some(mode & 0o777);
+        self
+    }
+
     /// Finalize the deflate frame, compute the CRC-32 checksum, and write
     /// the Data Descriptor.
     ///
@@ -387,6 +440,18 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
         // Update position tracker: compressed data + data descriptor
         self.zip.pos += compressed_size + dd_bytes.len() as u64;
 
+        let (mtime_msdos, unix_mtime) = match self.mtime {
+            Some(t) => {
+                let (time, date) = header::system_time_to_ms_dos(t);
+                let secs = t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                (Some((time, date)), Some(secs))
+            }
+            None => (None, None),
+        };
+
         self.zip.entries.push(StoredEntry {
             name: self.name.clone(),
             crc32,
@@ -394,6 +459,9 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             uncompressed_size: self.uncompressed_size,
             local_header_offset: self.local_header_offset,
             is_directory: false,
+            mtime: mtime_msdos,
+            unix_mtime,
+            unix_permissions: self.unix_permissions,
         });
 
         // Return the inner writer to ZipWriter
@@ -533,6 +601,100 @@ mod tests {
             uncompressed_size,
             local_header_offset: 0,
             is_directory: false,
+            mtime: None,
+            unix_mtime: None,
+            unix_permissions: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_entry_mtime_epoch() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip.append_file("epoch.txt").await.unwrap();
+        entry.set_mtime(std::time::SystemTime::UNIX_EPOCH);
+        entry.write_all(b"test").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        // Find first CD entry
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+
+        // CD entry offsets: 4=version_made_by, 6=version_needed, 8=flags,
+        // 10=method, 12=time, 14=date, 16=crc32, 20=compressed_size,
+        // 24=uncompressed_size, 28=name_len, 30=extra_len, 38=external_attrs
+        let time = u16::from_le_bytes(cd[12..14].try_into().unwrap());
+        let date = u16::from_le_bytes(cd[14..16].try_into().unwrap());
+        // Unix epoch (1970-01-01) clamped to MS-DOS range: 1980-01-01 00:00:00
+        assert_eq!(time, 0, "expected midnight");
+        assert_eq!(
+            date,
+            ((1980 - 1980) << 9) | (1 << 5) | 1,
+            "expected MS-DOS date for 1980-01-01"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_entry_permissions() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip.append_file("perm_test.txt").await.unwrap();
+        entry.set_permissions(0o644);
+        entry.write_all(b"test").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
+        assert_eq!(efa, ((0o644 | 0o100000) as u32) << 16);
+        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
+        assert!(vmb >> 8 == 3, "expected Unix host OS");
+    }
+
+    #[tokio::test]
+    async fn test_entry_mtime_and_permissions() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip.append_file("both.txt").await.unwrap();
+        entry.set_mtime(std::time::SystemTime::UNIX_EPOCH);
+        entry.set_permissions(0o755);
+        entry.write_all(b"test").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+        // CD time at offset 12
+        let time = u16::from_le_bytes(cd[12..14].try_into().unwrap());
+        assert_eq!(time, 0);
+        // external_file_attributes at offset 38
+        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
+        assert_eq!(efa, ((0o755 | 0o100000) as u32) << 16);
+        // version_made_by at offset 4
+        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
+        assert!(
+            vmb >> 8 == 3,
+            "expected version_made_by upper byte = 3 (Unix), got {}",
+            vmb >> 8
+        );
+    }
+
+    #[tokio::test]
+    async fn test_entry_default_no_metadata() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip.append_file("default.txt").await.unwrap();
+        entry.write_all(b"test").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
+        assert_eq!(efa, 0);
+        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
+        assert_eq!(vmb, super::header::VERSION_DEFLATE);
     }
 }

@@ -40,6 +40,8 @@ impl CompressionLevel {
     pub const DEFAULT: Self = Self(6);
 
     /// Create a new `CompressionLevel`.
+    ///
+    /// Panics if the level is not in the range 0-9.
     pub fn new(level: u8) -> Self {
         assert!(level <= 9, "compression level must be 0-9");
         Self(level)

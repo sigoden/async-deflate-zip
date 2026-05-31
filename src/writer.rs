@@ -220,9 +220,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # }
     /// ```
     pub async fn append_file<'a>(&'a mut self, name: &str) -> io::Result<EntryWriter<'a, W>> {
-        let mut inner = self.inner.take().unwrap();
+        let mut inner = self
+            .inner
+            .take()
+            .ok_or_else(|| io::Error::other("entry writer already active"))?;
         let lfh = header::LocalFileHeader::new(name, header::METHOD_DEFLATE);
-        let lfh_bytes = lfh.serialize();
+        let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
         self.pos += lfh_bytes.len() as u64;
@@ -266,9 +269,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # }
     /// ```
     pub async fn append_directory(&mut self, name: &str) -> io::Result<()> {
-        let mut inner = self.inner.take().unwrap();
+        let mut inner = self
+            .inner
+            .take()
+            .ok_or_else(|| io::Error::other("entry writer already active"))?;
         let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED);
-        let lfh_bytes = lfh.serialize();
+        let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
         self.pos += lfh_bytes.len() as u64;
@@ -325,9 +331,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # }
     /// ```
     pub async fn append_symlink(&mut self, name: &str, target: &str) -> io::Result<()> {
-        let mut inner = self.inner.take().unwrap();
+        let mut inner = self
+            .inner
+            .take()
+            .ok_or_else(|| io::Error::other("entry writer already active"))?;
         let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED);
-        let lfh_bytes = lfh.serialize();
+        let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
         self.pos += lfh_bytes.len() as u64;
@@ -383,17 +392,20 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// Returns [`std::io::Error`] if writing the Central Directory or EOCDR fails,
     /// or if the inner writer's shutdown fails.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if called when the inner writer has not been returned
+    /// Returns an error if the inner writer is not available
     /// (i.e., an `EntryWriter` is still active and hasn't been closed).
     pub async fn finalize(mut self) -> io::Result<()> {
-        let mut inner = self.inner.expect("zip already finalized");
+        let mut inner = self
+            .inner
+            .take()
+            .ok_or_else(|| io::Error::other("entry writer still active"))?;
         let cd_offset = self.pos;
 
         for entry in &self.entries {
             let cd_entry = entry.to_central_dir_entry();
-            let data = cd_entry.serialize();
+            let data = cd_entry.serialize()?;
             inner.write_all(&data).await?;
             self.pos += data.len() as u64;
         }
@@ -493,11 +505,14 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
     /// Returns [`std::io::Error`] if the deflate encoder fails to shut down, or if
     /// writing the Data Descriptor fails.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `close` is called more than once on the same entry.
+    /// Returns an error if `close` is called more than once on the same entry.
     pub async fn close(mut self) -> io::Result<()> {
-        let mut encoder = self.encoder.take().unwrap();
+        let mut encoder = self
+            .encoder
+            .take()
+            .ok_or_else(|| io::Error::other("entry already closed"))?;
         encoder.shutdown().await?;
 
         // Extract the inner writer from the encoder stack
@@ -560,7 +575,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.project();
-        match this.encoder.as_pin_mut().unwrap().poll_write(cx, buf) {
+        let encoder = match this.encoder.as_pin_mut() {
+            Some(e) => e,
+            None => return Poll::Ready(Err(io::Error::other("write after entry closed"))),
+        };
+        match encoder.poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
                 this.crc_hasher.update(&buf[..n]);
                 *this.uncompressed_size += n as u64;
@@ -571,15 +590,17 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project().encoder.as_pin_mut().unwrap().poll_flush(cx)
+        match self.project().encoder.as_pin_mut() {
+            Some(e) => e.poll_flush(cx),
+            None => Poll::Ready(Err(io::Error::other("flush after entry closed"))),
+        }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project()
-            .encoder
-            .as_pin_mut()
-            .unwrap()
-            .poll_shutdown(cx)
+        match self.project().encoder.as_pin_mut() {
+            Some(e) => e.poll_shutdown(cx),
+            None => Poll::Ready(Err(io::Error::other("shutdown after entry closed"))),
+        }
     }
 }
 

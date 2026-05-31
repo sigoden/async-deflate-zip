@@ -16,6 +16,8 @@
 //! All multi-byte values in the ZIP format are little-endian. Compression is
 //! indicated by the `method` field in each header.
 
+use std::io;
+
 // === Constants ===
 
 /// Local File Header signature: `PK\x03\x04` (`0x04034b50`).
@@ -213,7 +215,22 @@ impl LocalFileHeader {
         }
     }
 
-    pub(crate) fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(&self) -> io::Result<Vec<u8>> {
+        if self.name.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "LocalFileHeader filename too long: {} bytes",
+                    self.name.len()
+                ),
+            ));
+        }
+        if self.extra.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("LocalFileHeader extra too long: {} bytes", self.extra.len()),
+            ));
+        }
         let mut buf = Vec::with_capacity(30 + self.name.len() + self.extra.len());
         put_u32(&mut buf, LFH_SIG);
         put_u16(&mut buf, self.version_needed);
@@ -224,21 +241,11 @@ impl LocalFileHeader {
         put_u32(&mut buf, 0); // crc32 — in data descriptor
         put_u32(&mut buf, 0); // compressed size — in data descriptor
         put_u32(&mut buf, 0); // uncompressed size — in data descriptor
-        assert!(
-            self.name.len() <= u16::MAX as usize,
-            "LocalFileHeader filename too long: {} bytes",
-            self.name.len()
-        );
-        assert!(
-            self.extra.len() <= u16::MAX as usize,
-            "LocalFileHeader extra too long: {} bytes",
-            self.extra.len()
-        );
         put_u16(&mut buf, self.name.len() as u16);
         put_u16(&mut buf, self.extra.len() as u16);
         buf.extend_from_slice(&self.name);
         buf.extend_from_slice(&self.extra);
-        buf
+        Ok(buf)
     }
 }
 
@@ -311,7 +318,17 @@ pub(crate) struct CentralDirEntry {
 }
 
 impl CentralDirEntry {
-    pub(crate) fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(&self) -> io::Result<Vec<u8>> {
+        if self.name.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "CentralDirEntry filename too long: {} bytes",
+                    self.name.len()
+                ),
+            ));
+        }
+
         let use_zip64 = self.compressed_size > U32_MAX
             || self.uncompressed_size > U32_MAX
             || self.local_header_offset > U32_MAX;
@@ -327,6 +344,13 @@ impl CentralDirEntry {
         } else {
             self.extra.clone()
         };
+
+        if extra.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("CentralDirEntry extra too long: {} bytes", extra.len()),
+            ));
+        }
 
         let mut buf = Vec::with_capacity(46 + self.name.len() + extra.len());
         put_u32(&mut buf, CD_SIG);
@@ -360,16 +384,6 @@ impl CentralDirEntry {
                 self.uncompressed_size as u32
             },
         );
-        assert!(
-            self.name.len() <= u16::MAX as usize,
-            "CentralDirEntry filename too long: {} bytes",
-            self.name.len()
-        );
-        assert!(
-            extra.len() <= u16::MAX as usize,
-            "CentralDirEntry extra too long: {} bytes",
-            extra.len()
-        );
         put_u16(&mut buf, self.name.len() as u16);
         put_u16(&mut buf, extra.len() as u16);
         put_u16(&mut buf, 0); // file comment length
@@ -386,7 +400,7 @@ impl CentralDirEntry {
         );
         buf.extend_from_slice(&self.name);
         buf.extend_from_slice(&extra);
-        buf
+        Ok(buf)
     }
 
     fn zip64_extra(compressed_size: u64, uncompressed_size: u64, offset: u64) -> Vec<u8> {
@@ -528,7 +542,7 @@ mod tests {
     #[test]
     fn test_local_file_header_size() {
         let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE);
-        let data = lfh.serialize();
+        let data = lfh.serialize().unwrap();
         assert_eq!(data.len(), 30 + 8);
         assert_eq!(&data[0..4], &0x04034b50u32.to_le_bytes());
         assert_eq!(&data[8..10], &METHOD_DEFLATE.to_le_bytes());
@@ -567,7 +581,7 @@ mod tests {
             local_header_offset: 0,
             external_file_attributes: 0,
         };
-        let data = cde.serialize();
+        let data = cde.serialize().unwrap();
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());
         assert_eq!(&data[16..20], &0xDEADBEEFu32.to_le_bytes());
         assert_eq!(&data[20..24], &500u32.to_le_bytes());
@@ -591,7 +605,7 @@ mod tests {
             local_header_offset: 0,
             external_file_attributes: 0,
         };
-        let data = cde.serialize();
+        let data = cde.serialize().unwrap();
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());
         assert_eq!(&data[20..24], &u32::MAX.to_le_bytes());
         assert_eq!(&data[24..28], &u32::MAX.to_le_bytes());
@@ -632,7 +646,7 @@ mod tests {
             local_header_offset: 0,
             external_file_attributes: 0,
         };
-        let data = cde.serialize();
+        let data = cde.serialize().unwrap();
 
         // Verify ZIP64 sentinels in main fields
         assert_eq!(&data[20..24], &u32::MAX.to_le_bytes());
@@ -666,18 +680,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "filename too long")]
     fn test_local_file_header_name_too_long() {
-        // Bug 3: filename exceeding u16::MAX should panic, not silently truncate
+        // Filename exceeding u16::MAX should return an error, not silently truncate
         let name = "a".repeat(65536);
         let lfh = LocalFileHeader::new(&name, METHOD_STORED);
-        lfh.serialize();
+        let result = lfh.serialize();
+        assert!(result.is_err(), "expected Err for oversized filename");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("filename too long"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "filename too long")]
     fn test_central_dir_entry_name_too_long() {
-        // Bug 3: filename exceeding u16::MAX should panic in CD entry as well
+        // Filename exceeding u16::MAX should return an error in CD entry as well
         let cde = CentralDirEntry {
             version_made_by: VERSION_DEFLATE,
             version_needed: VERSION_DEFLATE,
@@ -693,7 +711,13 @@ mod tests {
             local_header_offset: 0,
             external_file_attributes: 0,
         };
-        cde.serialize();
+        let result = cde.serialize();
+        assert!(result.is_err(), "expected Err for oversized filename");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("filename too long"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

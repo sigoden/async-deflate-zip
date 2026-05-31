@@ -29,9 +29,14 @@ impl CompressionLevel {
     /// No compression (store only).
     pub const NONE: Self = Self(0);
 
+    /// Fast compression (level 1).
+    ///
+    /// Optimize for the best speed of encoding.
+    pub const FAST: Self = Self(1);
+
     /// Maximum compression (level 9).
     ///
-    /// Produces the smallest output but takes the longest.
+    /// Optimize for the size of data being encoded.
     pub const BEST: Self = Self(9);
 
     /// Default compression (level 6).

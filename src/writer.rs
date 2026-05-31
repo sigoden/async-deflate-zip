@@ -67,6 +67,7 @@ pub(crate) struct StoredEntry {
     uncompressed_size: u64,
     local_header_offset: u64,
     is_directory: bool,
+    is_symlink: bool,
     mtime: Option<(u16, u16)>,
     unix_mtime: Option<u64>,
     unix_permissions: Option<u32>,
@@ -76,7 +77,8 @@ impl StoredEntry {
     fn to_central_dir_entry(&self) -> header::CentralDirEntry {
         let (time, date) = self.mtime.unwrap_or_else(header::ms_dos_datetime);
 
-        let has_unix_attrs = self.unix_permissions.is_some() || self.unix_mtime.is_some();
+        let has_unix_attrs =
+            self.unix_permissions.is_some() || self.unix_mtime.is_some() || self.is_symlink;
         let version_made_by = if has_unix_attrs {
             header::VERSION_UNIX
         } else {
@@ -88,25 +90,28 @@ impl StoredEntry {
             None => Vec::new(),
         };
 
-        let file_type_bit: u32 = if self.is_directory {
-            0o040000
+        let file_type_bit: u32 = if self.is_symlink {
+            0o120000 // S_IFLNK
+        } else if self.is_directory {
+            0o040000 // S_IFDIR
         } else {
-            0o100000
+            0o100000 // S_IFREG
         };
-        let external_file_attributes = self
-            .unix_permissions
-            .map(|mode| (mode | file_type_bit) << 16)
-            .unwrap_or(0);
+        let external_file_attributes = match (self.unix_permissions, self.is_symlink) {
+            (Some(mode), _) => (mode | file_type_bit) << 16,
+            (None, true) => file_type_bit << 16, // Symlinks always need type bit
+            (None, false) => 0,
+        };
 
         header::CentralDirEntry {
             version_made_by,
-            version_needed: if self.is_directory {
+            version_needed: if self.is_directory || self.is_symlink {
                 header::VERSION_STORED
             } else {
                 header::VERSION_DEFLATE
             },
             flags: header::FLAG_DATA_DESC,
-            method: if self.is_directory {
+            method: if self.is_directory || self.is_symlink {
                 header::METHOD_STORED
             } else {
                 header::METHOD_DEFLATE
@@ -285,6 +290,77 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             uncompressed_size: 0,
             local_header_offset: offset,
             is_directory: true,
+            is_symlink: false,
+            mtime: None,
+            unix_mtime: None,
+            unix_permissions: None,
+        });
+        self.inner = Some(inner);
+        Ok(())
+    }
+
+    /// Add a symbolic link entry.
+    ///
+    /// The `name` is the path of the symlink, and `target` is the path
+    /// the symlink points to. The target is stored uncompressed as the
+    /// entry's data content. The Central Directory entry uses `S_IFLNK`
+    /// with `VERSION_UNIX` so Unix unzip tools correctly restore the
+    /// symlink.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::Error`] if writing the Local File Header, the symlink
+    /// target data, or the Data Descriptor fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use async_deflate_zip::ZipWriter;
+    ///
+    /// # async fn example() {
+    /// let mut buf = Vec::new();
+    /// let mut zip = ZipWriter::new(&mut buf);
+    /// zip.append_symlink("link.txt", "target.txt").await.unwrap();
+    /// zip.finalize().await.unwrap();
+    /// # }
+    /// ```
+    pub async fn append_symlink(&mut self, name: &str, target: &str) -> io::Result<()> {
+        let mut inner = self.inner.take().unwrap();
+        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED);
+        let lfh_bytes = lfh.serialize();
+        inner.write_all(&lfh_bytes).await?;
+        let offset = self.pos;
+        self.pos += lfh_bytes.len() as u64;
+
+        // Write the symlink target as stored (uncompressed) data
+        let target_bytes = target.as_bytes();
+        inner.write_all(target_bytes).await?;
+        self.pos += target_bytes.len() as u64;
+
+        // CRC-32 of the target path
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(target_bytes);
+        let crc32 = hasher.finalize();
+        let data_size = target_bytes.len() as u64;
+
+        let dd = header::DataDescriptor {
+            crc32,
+            compressed_size: data_size,
+            uncompressed_size: data_size,
+            zip64: false,
+        };
+        let dd_bytes = dd.serialize();
+        inner.write_all(&dd_bytes).await?;
+        self.pos += dd_bytes.len() as u64;
+
+        self.entries.push(StoredEntry {
+            name: name.to_string(),
+            crc32,
+            compressed_size: data_size,
+            uncompressed_size: data_size,
+            local_header_offset: offset,
+            is_directory: false,
+            is_symlink: true,
             mtime: None,
             unix_mtime: None,
             unix_permissions: None,
@@ -494,6 +570,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             uncompressed_size: self.uncompressed_size,
             local_header_offset: self.local_header_offset,
             is_directory: false,
+            is_symlink: false,
             mtime: mtime_msdos,
             unix_mtime,
             unix_permissions: self.unix_permissions,
@@ -614,6 +691,47 @@ mod tests {
         assert!(buf.windows(4).any(|w| w == b"PK\x03\x04"));
     }
 
+    #[tokio::test]
+    async fn test_symlink_entry() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        zip.append_symlink("link.txt", "target.txt").await.unwrap();
+        zip.finalize().await.unwrap();
+
+        // Find first CD entry
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+
+        // version_made_by at offset 4: upper byte should be 3 (Unix)
+        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
+        assert_eq!(vmb >> 8, 3, "expected Unix host OS for symlink");
+
+        // version_needed at offset 6: should be 10 (STORED)
+        let version_needed = u16::from_le_bytes(cd[6..8].try_into().unwrap());
+        assert_eq!(version_needed, 10, "expected VERSION_STORED for symlink");
+
+        // method at offset 10: should be 0 (STORED)
+        let method = u16::from_le_bytes(cd[10..12].try_into().unwrap());
+        assert_eq!(method, 0, "expected METHOD_STORED for symlink");
+
+        // external_file_attributes at offset 38: should have S_IFLNK (0o120000)
+        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
+        assert!(
+            (efa >> 16) & 0o170000 == 0o120000,
+            "expected S_IFLNK in external_file_attributes, got {:06o}",
+            efa >> 16
+        );
+
+        // Verify symlink target content via LFH + data
+        // Find the LFH and read the data after it
+        let lfh_pos = buf.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
+        let lfh = &buf[lfh_pos..];
+        let lfh_name_len = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as usize;
+        let lfh_total = 30 + lfh_name_len; // LFH header byte count
+        let data = &buf[lfh_pos + lfh_total..lfh_pos + lfh_total + 10];
+        assert_eq!(data, b"target.txt", "symlink target mismatch");
+    }
+
     fn lookup_entry(buf: &[u8], index: usize) -> StoredEntry {
         let sig = b"PK\x01\x02";
         let pos: Vec<usize> = buf
@@ -638,6 +756,7 @@ mod tests {
             uncompressed_size,
             local_header_offset: 0,
             is_directory: false,
+            is_symlink: false,
             mtime: None,
             unix_mtime: None,
             unix_permissions: None,

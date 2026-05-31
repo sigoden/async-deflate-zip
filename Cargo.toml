@@ -1,0 +1,15 @@
+[package]
+name = "async-deflate-zip"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "Streaming async ZIP archive writer with per-file deflate compression"
+license = "MIT"
+repository = "https://github.com/sigoden/async-deflate-zip"
+readme = "README.md"
+
+[dependencies]
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt"] }
+async-compression = { version = "0.4", features = ["tokio", "deflate"] }
+crc32fast = "1"
+pin-project-lite = "0.2"

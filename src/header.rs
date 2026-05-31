@@ -49,7 +49,10 @@ pub(crate) const METHOD_DEFLATE: u16 = 8;
 /// after the compressed data rather than in the local file header.
 pub(crate) const FLAG_DATA_DESC: u16 = 1 << 3;
 
-/// Version needed: 2.0 — supports DEFLATE compression.
+/// Version needed: 1.0 (10) — supports stored (uncompressed) entries.
+pub(crate) const VERSION_STORED: u16 = 10;
+
+/// Version needed: 2.0 (20) — supports DEFLATE compression.
 pub(crate) const VERSION_DEFLATE: u16 = 20;
 
 /// Version made by: Unix host OS (upper byte = 3) + deflate support (lower byte = 20).
@@ -221,6 +224,16 @@ impl LocalFileHeader {
         put_u32(&mut buf, 0); // crc32 — in data descriptor
         put_u32(&mut buf, 0); // compressed size — in data descriptor
         put_u32(&mut buf, 0); // uncompressed size — in data descriptor
+        assert!(
+            self.name.len() <= u16::MAX as usize,
+            "LocalFileHeader filename too long: {} bytes",
+            self.name.len()
+        );
+        assert!(
+            self.extra.len() <= u16::MAX as usize,
+            "LocalFileHeader extra too long: {} bytes",
+            self.extra.len()
+        );
         put_u16(&mut buf, self.name.len() as u16);
         put_u16(&mut buf, self.extra.len() as u16);
         buf.extend_from_slice(&self.name);
@@ -304,11 +317,13 @@ impl CentralDirEntry {
             || self.local_header_offset > U32_MAX;
 
         let extra = if use_zip64 {
-            Self::zip64_extra(
+            let mut z64 = Self::zip64_extra(
                 self.compressed_size,
                 self.uncompressed_size,
                 self.local_header_offset,
-            )
+            );
+            z64.extend_from_slice(&self.extra);
+            z64
         } else {
             self.extra.clone()
         };
@@ -344,6 +359,16 @@ impl CentralDirEntry {
             } else {
                 self.uncompressed_size as u32
             },
+        );
+        assert!(
+            self.name.len() <= u16::MAX as usize,
+            "CentralDirEntry filename too long: {} bytes",
+            self.name.len()
+        );
+        assert!(
+            extra.len() <= u16::MAX as usize,
+            "CentralDirEntry extra too long: {} bytes",
+            extra.len()
         );
         put_u16(&mut buf, self.name.len() as u16);
         put_u16(&mut buf, extra.len() as u16);
@@ -586,6 +611,89 @@ mod tests {
         assert_eq!(&data[10..12], &10u16.to_le_bytes());
         assert_eq!(&data[12..16], &5000u32.to_le_bytes());
         assert_eq!(&data[16..20], &10000u32.to_le_bytes());
+    }
+
+    #[test]
+    fn test_central_dir_entry_zip64_with_extra_field() {
+        // Bug 1 regression: ZIP64 extra must NOT replace existing extra (e.g. extended timestamp)
+        let timestamp_extra = build_extended_timestamp_extra(1700000000);
+        let cde = CentralDirEntry {
+            version_made_by: VERSION_UNIX,
+            version_needed: VERSION_DEFLATE,
+            flags: FLAG_DATA_DESC,
+            method: METHOD_DEFLATE,
+            time: 0,
+            date: 0,
+            crc32: 0x12345678,
+            compressed_size: 5_000_000_000,
+            uncompressed_size: 10_000_000_000,
+            name: b"big_with_ts.bin".to_vec(),
+            extra: timestamp_extra.clone(),
+            local_header_offset: 0,
+            external_file_attributes: 0,
+        };
+        let data = cde.serialize();
+
+        // Verify ZIP64 sentinels in main fields
+        assert_eq!(&data[20..24], &u32::MAX.to_le_bytes());
+        assert_eq!(&data[24..28], &u32::MAX.to_le_bytes());
+
+        // Parse extra length
+        let name_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(data[30..32].try_into().unwrap()) as usize;
+
+        // Extra must be larger than ZIP64 alone (i.e., timestamp is preserved)
+        assert!(
+            extra_len > 20,
+            "expected extra_len > 20 (ZIP64 only), got {extra_len}"
+        );
+
+        let extra_start = 46 + name_len;
+        let extra_data = &data[extra_start..extra_start + extra_len];
+
+        // Find ZIP64 extra field header (0x0001)
+        assert_eq!(
+            u16::from_le_bytes(extra_data[0..2].try_into().unwrap()),
+            0x0001
+        );
+
+        // Find extended timestamp extra field header (0x5455)
+        let has_ts = extra_data.windows(4).any(|w| w[0] == 0x55 && w[1] == 0x54);
+        assert!(
+            has_ts,
+            "extended timestamp extra (0x5455) missing from serialized extra field"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "filename too long")]
+    fn test_local_file_header_name_too_long() {
+        // Bug 3: filename exceeding u16::MAX should panic, not silently truncate
+        let name = "a".repeat(65536);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED);
+        lfh.serialize();
+    }
+
+    #[test]
+    #[should_panic(expected = "filename too long")]
+    fn test_central_dir_entry_name_too_long() {
+        // Bug 3: filename exceeding u16::MAX should panic in CD entry as well
+        let cde = CentralDirEntry {
+            version_made_by: VERSION_DEFLATE,
+            version_needed: VERSION_DEFLATE,
+            flags: FLAG_DATA_DESC,
+            method: METHOD_STORED,
+            time: 0,
+            date: 0,
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            name: "a".repeat(65536).into_bytes(),
+            extra: Vec::new(),
+            local_header_offset: 0,
+            external_file_attributes: 0,
+        };
+        cde.serialize();
     }
 
     #[test]

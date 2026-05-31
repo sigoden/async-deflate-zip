@@ -100,7 +100,11 @@ impl StoredEntry {
 
         header::CentralDirEntry {
             version_made_by,
-            version_needed: header::VERSION_DEFLATE,
+            version_needed: if self.is_directory {
+                header::VERSION_STORED
+            } else {
+                header::VERSION_DEFLATE
+            },
             flags: header::FLAG_DATA_DESC,
             method: if self.is_directory {
                 header::METHOD_STORED
@@ -679,6 +683,56 @@ mod tests {
             "expected version_made_by upper byte = 3 (Unix), got {}",
             vmb >> 8
         );
+    }
+
+    #[tokio::test]
+    async fn test_directory_version_needed() {
+        // Bug 2 regression: CD version_needed for directory entries must be 10 (STORED), not 20
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        zip.append_directory("mydir/").await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+        let version_needed = u16::from_le_bytes(cd[6..8].try_into().unwrap());
+        assert_eq!(
+            version_needed, 10,
+            "directory CD version_needed should be 10 (STORED), got {version_needed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_entry_mtime_appears_in_cd_extra() {
+        // Bug 1 integration: verify extended timestamp extra field appears in CD entry
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip.append_file("mtime_test.txt").await.unwrap();
+        entry.set_mtime(std::time::SystemTime::UNIX_EPOCH);
+        entry.write_all(b"hello").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
+
+        // Extra field should contain the extended timestamp header 0x5455
+        let extra_start = 46 + name_len;
+        let extra = &cd[extra_start..extra_start + extra_len];
+        let has_ts_extra = extra.windows(2).any(|w| w == b"UT");
+        assert!(
+            has_ts_extra,
+            "CD entry extra should contain extended timestamp (0x5455/UT) when mtime is set"
+        );
+        assert!(
+            extra_len >= 4,
+            "extra_len should be >= 4 when mtime is set, got {extra_len}"
+        );
+        // version_made_by should indicate Unix
+        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
+        assert_eq!(vmb >> 8, 3, "expected Unix host OS when mtime is set");
     }
 
     #[tokio::test]

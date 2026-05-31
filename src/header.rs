@@ -157,25 +157,48 @@ pub(crate) struct LocalFileHeader {
     pub(crate) extra: Vec<u8>,
 }
 
+/// Build a ZIP64 extra field for a Local File Header where sizes are
+/// recorded via data descriptor (0 in the header fields).
+///
+/// Since the data descriptor flag is set, the 32-bit size fields in the
+/// LFH are 0 (not 0xFFFFFFFF sentinels). The ZIP64 extra field includes
+/// the 0x0001 tag header with data_size=0 to signal ZIP64 usage without
+/// carrying redundant zero-size fields. This satisfies parsers that check
+/// for the ZIP64 extra field tag to determine ZIP64 capability.
+pub(crate) fn build_zip64_extra_lfh() -> Vec<u8> {
+    let mut data = Vec::with_capacity(4);
+    put_u16(&mut data, 0x0001); // ZIP64 extra ID
+    put_u16(&mut data, 0); // data size = 0 (sizes in data descriptor)
+    data
+}
+
 impl LocalFileHeader {
-    pub(crate) fn new(name: &str, method: u16) -> Self {
+    pub(crate) fn new(name: &str, method: u16, zip64: bool) -> Self {
         let (time, date) = ms_dos_datetime();
         let mut flags = FLAG_DATA_DESC;
         if !name.is_ascii() {
             flags |= 1 << 11; // EFS / Language encoding flag (bit 11)
         }
         Self {
-            version_needed: match method {
-                METHOD_STORED => VERSION_STORED,
-                METHOD_DEFLATE => VERSION_DEFLATE,
-                _ => VERSION_DEFLATE,
+            version_needed: if zip64 {
+                VERSION_ZIP64
+            } else {
+                match method {
+                    METHOD_STORED => VERSION_STORED,
+                    METHOD_DEFLATE => VERSION_DEFLATE,
+                    _ => VERSION_DEFLATE,
+                }
             },
             flags,
             method,
             time,
             date,
             name: name.as_bytes().to_vec(),
-            extra: Vec::new(),
+            extra: if zip64 {
+                build_zip64_extra_lfh()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -507,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_local_file_header_size() {
-        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE);
+        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false);
         let data = lfh.serialize().unwrap();
         assert_eq!(data.len(), 30 + 8);
         assert_eq!(&data[0..4], &0x04034b50u32.to_le_bytes());
@@ -520,6 +543,43 @@ mod tests {
         );
         let extra_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
         assert_eq!(extra_len, 0, "expected no extra field, got {extra_len}");
+    }
+
+    #[test]
+    fn test_local_file_header_zip64() {
+        // When zip64=true, version_needed should be 45 and extra should contain
+        // the ZIP64 extra ID (0x0001) to signal ZIP64 capability.
+        let lfh = LocalFileHeader::new("bigfile.bin", METHOD_DEFLATE, true);
+        let data = lfh.serialize().unwrap();
+        // version_needed at offset 4
+        assert_eq!(
+            u16::from_le_bytes(data[4..6].try_into().unwrap()),
+            VERSION_ZIP64,
+            "expected VERSION_ZIP64 (45) for ZIP64 LFH"
+        );
+        // extra field should not be empty
+        let name_len = u16::from_le_bytes(data[26..28].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
+        assert!(
+            extra_len >= 4,
+            "expected non-empty ZIP64 extra field, got {extra_len}"
+        );
+        let extra_start = 30 + name_len;
+        let extra = &data[extra_start..extra_start + extra_len];
+        // Should contain ZIP64 extra ID 0x0001
+        assert_eq!(
+            u16::from_le_bytes(extra[0..2].try_into().unwrap()),
+            0x0001,
+            "expected ZIP64 extra ID (0x0001)"
+        );
+        // Also test with stored method + zip64 to confirm VERSION_ZIP64 takes priority
+        let lfh_stored = LocalFileHeader::new("bigdir", METHOD_STORED, true);
+        let data2 = lfh_stored.serialize().unwrap();
+        assert_eq!(
+            u16::from_le_bytes(data2[4..6].try_into().unwrap()),
+            VERSION_ZIP64,
+            "expected VERSION_ZIP64 (45) for ZIP64 LFH even with METHOD_STORED"
+        );
     }
 
     #[test]
@@ -754,7 +814,7 @@ mod tests {
     fn test_local_file_header_name_too_long() {
         // Filename exceeding u16::MAX should return an error, not silently truncate
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, METHOD_STORED);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false);
         let result = lfh.serialize();
         assert!(result.is_err(), "expected Err for oversized filename");
         let err = result.unwrap_err();

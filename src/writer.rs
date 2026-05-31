@@ -240,7 +240,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             header::METHOD_DEFLATE
         };
 
-        let lfh = header::LocalFileHeader::new(name, method);
+        let needs_zip64 = self.pos > header::U32_MAX;
+        let lfh = header::LocalFileHeader::new(name, method, needs_zip64);
         let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
@@ -308,7 +309,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
                 io::Error::other("entry writer already active")
             }
         })?;
-        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED);
+        let needs_zip64 = self.pos > header::U32_MAX;
+        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED, needs_zip64);
         let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
@@ -359,7 +361,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
                 io::Error::other("entry writer already active")
             }
         })?;
-        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED);
+        let needs_zip64 = self.pos > header::U32_MAX;
+        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED, needs_zip64);
         let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
@@ -380,7 +383,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             crc32,
             compressed_size: data_size,
             uncompressed_size: data_size,
-            zip64: false,
+            zip64: data_size > header::U32_MAX || offset > header::U32_MAX,
         };
         let dd_bytes = dd.serialize();
         inner.write_all(&dd_bytes).await?;
@@ -526,7 +529,7 @@ impl<W: AsyncWrite + Unpin> DirectoryEntryWriter<'_, W> {
             crc32: 0,
             compressed_size: 0,
             uncompressed_size: 0,
-            zip64: false,
+            zip64: self.local_header_offset > header::U32_MAX,
         };
         let dd_bytes = dd.serialize();
         inner.write_all(&dd_bytes).await?;

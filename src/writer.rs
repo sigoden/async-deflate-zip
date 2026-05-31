@@ -238,7 +238,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             crc_hasher: crc32fast::Hasher::new(),
             uncompressed_size: 0,
             local_header_offset: offset,
-            guard: CloseGuard::new(name.to_string()),
+            name: name.to_string(),
             mtime: None,
             unix_permissions: None,
         })
@@ -430,37 +430,6 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     }
 }
 
-// === CloseGuard ===
-
-/// A guard that ensures [`EntryWriter`] was properly closed before being dropped.
-///
-/// If dropped without calling [`close`](CloseGuard::close), it panics.
-struct CloseGuard {
-    closed: bool,
-    name: String,
-}
-
-impl CloseGuard {
-    fn new(name: String) -> Self {
-        Self {
-            closed: false,
-            name,
-        }
-    }
-
-    fn close(&mut self) {
-        self.closed = true;
-    }
-}
-
-impl Drop for CloseGuard {
-    fn drop(&mut self) {
-        if !self.closed {
-            panic!("EntryWriter for '{}' was dropped without calling .close().await. This loses the inner writer and corrupts the ZipWriter.", self.name);
-        }
-    }
-}
-
 // === EntryWriter ===
 
 pin_project_lite::pin_project! {
@@ -485,7 +454,7 @@ pin_project_lite::pin_project! {
         crc_hasher: crc32fast::Hasher,
         uncompressed_size: u64,
         local_header_offset: u64,
-        guard: CloseGuard,
+        name: String,
         mtime: Option<std::time::SystemTime>,
         unix_permissions: Option<u32>,
     }
@@ -564,7 +533,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
         };
 
         self.zip.entries.push(StoredEntry {
-            name: self.guard.name.clone(),
+            name: self.name.clone(),
             crc32,
             compressed_size,
             uncompressed_size: self.uncompressed_size,
@@ -575,8 +544,6 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             unix_mtime,
             unix_permissions: self.unix_permissions,
         });
-
-        self.guard.close();
 
         // Return the inner writer to ZipWriter
         self.zip.inner = Some(inner);

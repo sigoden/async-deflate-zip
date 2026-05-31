@@ -35,5 +35,6 @@ mod types;
 mod writer;
 
 pub use types::CompressionLevel;
+pub use writer::DirectoryEntryWriter;
 pub use writer::EntryWriter;
 pub use writer::ZipWriter;

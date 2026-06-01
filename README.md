@@ -6,21 +6,33 @@
 
 Streaming async ZIP archive writer with per-file deflate compression.
 
-## Usage
+# Usage
+
+```toml
+[dependencies]
+async-deflate-zip = "0.1.0"
+```
 
 ```rust
 use async_deflate_zip::ZipWriter;
+use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-let mut buf = Vec::new();
-let mut zip = ZipWriter::new(&mut buf);
+let file = File::create("tmp/output.zip").await?;
+let mut zip = ZipWriter::new(file);
 
-let mut entry = zip.append_file("hello.txt").await.unwrap();
-entry.write_all(b"Hello, World!").await.unwrap();
-entry.close().await.unwrap();
+let mut entry = zip.append_file("hello.txt").await?;
+entry.write_all(b"Hello, World!").await?;
+entry.close().await?;
 
-zip.finalize().await.unwrap();
+zip.finalize().await?;
 ```
+
+## Why Deflate Only?
+
+**Performance balance.** Deflate offers the best trade-off between compression ratio and CPU cost for async streaming. Heavier algorithms like LZMA or BZip2 create backpressure that degrades I/O throughput, while Deflate keeps the pipeline responsive with sufficient compression for most real-world data.
+
+**Universal compatibility.** Deflate (method 8) is the universal baseline — every ZIP reader on every platform supports it. Non-Deflate methods (LZMA, BZip2, PPMd) have fragmented tool and OS support. By committing to Deflate-only, this library guarantees every archive it produces is readable anywhere.
 
 ## License
 

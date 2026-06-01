@@ -18,11 +18,11 @@ use std::process::Command;
 use tokio::io::AsyncWriteExt;
 
 // ============================================================
-// Test 1: Basic single file with default compression
+// Basic single file with default compression
 // ============================================================
 async fn test_basic_single_file() {
-    println!("--- Test 1: Basic single file (default compression) ---");
-    let path = zip_out_path("01_test_basic_single_file");
+    println!("--- Basic single file (default compression) ---");
+    let path = zip_out_path("test_basic_single_file");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
@@ -32,14 +32,13 @@ async fn test_basic_single_file() {
     zip.finalize().await.unwrap();
 
     verify_zip_structure(&path, 1).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 2: All Compression constants
+// All Compression constants
 // ============================================================
 async fn test_compression_levels() {
-    println!("--- Test 2: All compression levels ---");
+    println!("--- All compression levels ---");
 
     let levels: Vec<(&str, Compression)> = vec![
         ("NONE", Compression::none()),
@@ -51,7 +50,7 @@ async fn test_compression_levels() {
     let data = vec![b'A'; 10_000]; // highly compressible
 
     for (label, level) in &levels {
-        let path = zip_out_path(&format!("02_test_compression_levels_{label}"));
+        let path = zip_out_path(&format!("test_compression_levels_{label}"));
         let file = tokio::fs::File::create(&path).await.unwrap();
         let mut zip = ZipWriter::new(file).with_level(*level);
         let mut entry = zip.append_file(&format!("data_{label}.bin")).await.unwrap();
@@ -69,15 +68,14 @@ async fn test_compression_levels() {
         );
         verify_zip_structure(&path, 1).await;
     }
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 3: Multiple files + nested paths
+// Multiple files + nested paths
 // ============================================================
 async fn test_multiple_files_nested() {
-    println!("--- Test 3: Multiple files with nested paths ---");
-    let path = zip_out_path("03_test_multiple_files_nested");
+    println!("--- Multiple files with nested paths ---");
+    let path = zip_out_path("test_multiple_files_nested");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
@@ -96,15 +94,14 @@ async fn test_multiple_files_nested() {
 
     zip.finalize().await.unwrap();
     verify_zip_structure(&path, files.len()).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 4: Directory entries with metadata
+// Directory entries with metadata
 // ============================================================
 async fn test_directory_entries() {
-    println!("--- Test 4: Directory entries ---");
-    let path = zip_out_path("04_test_directory_entries");
+    println!("--- Directory entries ---");
+    let path = zip_out_path("test_directory_entries");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
@@ -136,15 +133,14 @@ async fn test_directory_entries() {
     zip.finalize().await.unwrap();
     // 4 directories + 1 file
     verify_zip_structure(&path, 5).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 5: Symlink entries
+// Symlink entries
 // ============================================================
 async fn test_symlink_entries() {
-    println!("--- Test 5: Symlink entries ---");
-    let path = zip_out_path("05_test_symlink_entries");
+    println!("--- Symlink entries ---");
+    let path = zip_out_path("test_symlink_entries");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
@@ -155,15 +151,14 @@ async fn test_symlink_entries() {
 
     zip.finalize().await.unwrap();
     verify_zip_structure(&path, 2).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 6: File with mtime and permissions
+// File with mtime and permissions
 // ============================================================
 async fn test_entry_metadata() {
-    println!("--- Test 6: Entry metadata (mtime + permissions) ---");
-    let path = zip_out_path("06_test_entry_metadata");
+    println!("--- Entry metadata (mtime + permissions) ---");
+    let path = zip_out_path("test_entry_metadata");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
@@ -202,15 +197,14 @@ async fn test_entry_metadata() {
 
     zip.finalize().await.unwrap();
     verify_zip_structure(&path, 4).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 7: Write file from filesystem into archive
+// Write file from filesystem into archive
 // ============================================================
 async fn test_from_filesystem() {
-    println!("--- Test 7: Add files from filesystem ---");
-    let tmp_dir = zip_out_dir().join("07_test_from_filesystem");
+    println!("--- Add files from filesystem ---");
+    let tmp_dir = zip_out_dir().join("test_from_filesystem");
     ensure_dir_clean(&tmp_dir).await;
 
     // Create some test files on disk
@@ -227,7 +221,7 @@ async fn test_from_filesystem() {
     .await
     .unwrap();
 
-    let path = zip_out_path("07_test_from_filesystem");
+    let path = zip_out_path("test_from_filesystem");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
@@ -248,15 +242,14 @@ async fn test_from_filesystem() {
     zip.finalize().await.unwrap();
 
     verify_zip_structure(&path, 3).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 8: Stored entry (compression level 0)
+// Stored entry (compression level 0)
 // ============================================================
 async fn test_stored_entry() {
-    println!("--- Test 8: Stored entry (level=NONE / method=STORED) ---");
-    let path = zip_out_path("08_test_stored_entry");
+    println!("--- Stored entry (level=NONE / method=STORED) ---");
+    let path = zip_out_path("test_stored_entry");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_level(Compression::none());
 
@@ -270,32 +263,56 @@ async fn test_stored_entry() {
 
     zip.finalize().await.unwrap();
     verify_zip_structure(&path, 2).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
-// Test 9: Chain API (builder pattern)
+// UTF-8 filenames and content
 // ============================================================
-async fn test_builder_chain() {
-    println!("--- Test 9: Builder chain ---");
-    let path = zip_out_path("09_test_builder_chain");
+async fn test_unicode_entries() {
+    println!("--- UTF-8 filenames and content ---");
+    let path = zip_out_path("test_unicode_entries");
     let file = tokio::fs::File::create(&path).await.unwrap();
-    // Chaining: new → with_level → append_file
-    let mut zip = ZipWriter::new(file).with_level(Compression::best());
-    let mut entry = zip.append_file("chained.txt").await.unwrap();
-    entry.write_all(b"builder pattern test").await.unwrap();
-    entry.close().await.unwrap();
+    let mut zip = ZipWriter::new(file);
+
+    // German filename with German text content
+    {
+        let mut entry = zip.append_file("Grüß Gott.txt").await.unwrap();
+        entry
+            .write_all("Schöne Grüße aus der UTF-8-Welt!".as_bytes())
+            .await
+            .unwrap();
+        entry.close().await.unwrap();
+        println!("  added: Grüß Gott.txt");
+    }
+
+    // Chinese filename with Chinese text content
+    {
+        let mut entry = zip.append_file("世界.txt").await.unwrap();
+        entry
+            .write_all("你好，世界！来自异步压缩库的问候。".as_bytes())
+            .await
+            .unwrap();
+        entry.close().await.unwrap();
+        println!("  added: 世界.txt");
+    }
+
+    // Directory with Chinese name
+    {
+        let dir = zip.append_directory("목차/").await.unwrap();
+        dir.close().await.unwrap();
+        println!("  added: 목차/");
+    }
+
     zip.finalize().await.unwrap();
-    verify_zip_structure(&path, 1).await;
-    println!("  PASS\n");
+    verify_zip_structure(&path, 3).await;
 }
 
 // ============================================================
-// Test 10: Multiple small entries to trigger ZIP64 via entry count
+// Multiple small entries to trigger ZIP64 via entry count
 // ============================================================
 async fn test_zip64_many_entries() {
-    println!("--- Test 10: Many entries (>=65535) to trigger ZIP64 via count ---");
-    let path = zip_out_path("10_test_zip64_many_entries");
+    println!("--- Many entries (>=65535) to trigger ZIP64 via count ---");
+    let path = zip_out_path("test_zip64_many_entries");
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_level(Compression::none());
 
@@ -311,18 +328,20 @@ async fn test_zip64_many_entries() {
 
     // Verify entry count via zipinfo/unzip or self-contained parser
     verify_zip_structure(&path, count).await;
+
+    println!("ZIP64 with {count} entries created successfully\n");
 }
 
 // ============================================================
-// Test 11: Large file >4GiB (ZIP64)
+// Large file >4GiB (ZIP64)
 // ============================================================
 async fn test_large_file_zip64() {
-    println!("--- Test 11: Large file >4GiB (ZIP64) ---");
+    println!("--- Large file >4GiB (ZIP64) ---");
 
     let large_file = Path::new("/tmp")
         .join("comprehensive_test")
         .join("bigfile.bin");
-    let output_zip = zip_out_path("11_test_large_file_zip64");
+    let output_zip = zip_out_path("test_large_file_zip64");
 
     println!("  generating 4.5 GiB test file with dd...");
 
@@ -403,7 +422,6 @@ async fn test_large_file_zip64() {
 
     // Verify structure with unzip/zipinfo or self-contained parser
     verify_zip_structure(&output_zip, 2).await;
-    println!("  PASS\n");
 }
 
 // ============================================================
@@ -426,7 +444,7 @@ async fn main() {
     test_entry_metadata().await;
     test_from_filesystem().await;
     test_stored_entry().await;
-    test_builder_chain().await;
+    test_unicode_entries().await;
 
     // ZIP64 via many entries (memory-safe)
     test_zip64_many_entries().await;
@@ -469,6 +487,10 @@ async fn verify_zip_structure(path: &Path, expected_entries: usize) {
             .lines()
             .filter(|l| l.starts_with("    testing:"))
             .count();
+
+        if count < 10 {
+            println!("{output}");
+        }
 
         assert_eq!(
             count, expected_entries,

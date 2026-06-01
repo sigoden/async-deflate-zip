@@ -134,6 +134,27 @@ pub(crate) fn build_extended_timestamp_extra(mtime: u64) -> Vec<u8> {
     buf
 }
 
+/// Convert an optional `SystemTime` to MS-DOS date/time and Unix timestamp pair.
+///
+/// Used by both `EntryWriter::close` and `DirectoryWriter::close` to convert
+/// the user-set mtime into the MS-DOS format stored in the Central Directory
+/// header and the Unix seconds stored in the extended timestamp extra field.
+pub(crate) fn mtime_to_ms_dos_and_unix(
+    mtime: Option<std::time::SystemTime>,
+) -> (Option<(u16, u16)>, Option<u64>) {
+    match mtime {
+        Some(t) => {
+            let (time, date) = system_time_to_ms_dos(t);
+            let secs = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            (Some((time, date)), Some(secs))
+        }
+        None => (None, None),
+    }
+}
+
 // === Header structures ===
 
 /// Local File Header (30 bytes + filename + extra).

@@ -132,17 +132,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
         // Update position tracker: compressed data + data descriptor
         self.zip.pos += compressed_size + dd_bytes.len() as u64;
 
-        let (mtime_msdos, unix_mtime) = match self.mtime {
-            Some(t) => {
-                let (time, date) = header::system_time_to_ms_dos(t);
-                let secs = t
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                (Some((time, date)), Some(secs))
-            }
-            None => (None, None),
-        };
+        let (mtime_msdos, unix_mtime) = header::mtime_to_ms_dos_and_unix(self.mtime);
 
         self.zip.entries.push(StoredEntry {
             name: self.name.clone(),

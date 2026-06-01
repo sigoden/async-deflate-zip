@@ -261,7 +261,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip64: data_size > header::U32_MAX || offset > header::U32_MAX,
         };
         let dd_bytes = dd.serialize();
-        inner.write_all(&dd_bytes).await?;
+        inner.write_all(&dd_bytes).await.map_err(|e| {
+            self.poisoned = true;
+            ZipError::Io(e)
+        })?;
         self.pos += dd_bytes.len() as u64;
 
         self.entries.push(StoredEntry {

@@ -876,7 +876,7 @@ mod tests {
         let month = (date >> 5) & 0x0F;
         let day = date & 0x1F;
         assert!(year >= 2026);
-        assert!(month >= 1 && month <= 12);
-        assert!(day >= 1 && day <= 31);
+        assert!((1..=12).contains(&month));
+        assert!((1..=31).contains(&day));
     }
 }

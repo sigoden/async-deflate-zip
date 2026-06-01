@@ -276,11 +276,7 @@ mod tests {
             | (local_epoch.minute() as u16) << 5
             | (local_epoch.second() as u16 / 2);
         assert_eq!(time, expected_time, "expected local time for epoch");
-        assert_eq!(
-            date,
-            ((1980 - 1980) << 9) | (1 << 5) | 1,
-            "expected MS-DOS date for 1980-01-01"
-        );
+        assert_eq!(date, (1 << 5) | 1, "expected MS-DOS date for 1980-01-01");
     }
 
     #[tokio::test]

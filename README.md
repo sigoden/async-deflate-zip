@@ -1,6 +1,6 @@
 # async-deflate-zip
-[![Crates.io](https://img.shields.io/crates/v/async_deflate_zip?style=flat-square)](https://crates.io/crates/async_deflate_zip)
-[![docs.rs](https://img.shields.io/docsrs/async_deflate_zip?style=flat-square)](https://docs.rs/async_deflate_zip/)
+[![Crates.io](https://img.shields.io/crates/v/async-deflate-zip?style=flat-square)](https://crates.io/crates/async-deflate-zip)
+[![docs.rs](https://img.shields.io/docsrs/async-deflate-zip?style=flat-square)](https://docs.rs/async-deflate-zip/)
 [![GitHub Workflow Status (branch)](https://img.shields.io/github/actions/workflow/status/sigoden/async-deflate-zip/ci.yml?branch=main&style=flat-square)](https://github.com/sigoden/async-deflate-zip/actions?query=branch%3Amain)
 
 

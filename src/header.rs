@@ -393,28 +393,16 @@ impl CentralDirEntry {
     }
 
     fn zip64_extra(compressed_size: u64, uncompressed_size: u64, offset: u64) -> Vec<u8> {
-        let mut data = Vec::new();
-        put_u16(&mut data, 0x0001);
-        let mut size = 0u16;
-        if uncompressed_size > U32_MAX {
-            size += 8;
-        }
-        if compressed_size > U32_MAX {
-            size += 8;
-        }
-        if offset > U32_MAX {
-            size += 8;
-        }
-        put_u16(&mut data, size);
-        if uncompressed_size > U32_MAX {
-            put_u64(&mut data, uncompressed_size);
-        }
-        if compressed_size > U32_MAX {
-            put_u64(&mut data, compressed_size);
-        }
-        if offset > U32_MAX {
-            put_u64(&mut data, offset);
-        }
+        // Always write all three u64 fields in fixed order.
+        // Info-ZIP unzip expects the full 24-byte body when ZIP64 is used,
+        // even if some values fit in 32 bits. Omitting fields causes
+        // positional misalignment and "extra field corrupt" warnings.
+        let mut data = Vec::with_capacity(28);
+        put_u16(&mut data, 0x0001); // ZIP64 extra ID
+        put_u16(&mut data, 24); // data size = 24 (3 × u64)
+        put_u64(&mut data, uncompressed_size);
+        put_u64(&mut data, compressed_size);
+        put_u64(&mut data, offset);
         data
     }
 }
@@ -640,10 +628,33 @@ mod tests {
             external_file_attributes: 0,
         };
         let data = cde.serialize().unwrap();
+
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());
         assert_eq!(&data[20..24], &u32::MAX.to_le_bytes());
         assert_eq!(&data[24..28], &u32::MAX.to_le_bytes());
         assert_eq!(&data[6..8], &VERSION_ZIP64.to_le_bytes());
+
+        // Verify ZIP64 extra field is exactly 28 bytes with all 3 fields
+        let name_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(data[30..32].try_into().unwrap()) as usize;
+        assert_eq!(
+            extra_len, 28,
+            "expected 28-byte ZIP64 extra, got {extra_len}"
+        );
+
+        let extra_start = 46 + name_len;
+        let extra = &data[extra_start..extra_start + extra_len];
+        assert_eq!(u16::from_le_bytes(extra[0..2].try_into().unwrap()), 0x0001);
+        assert_eq!(u16::from_le_bytes(extra[2..4].try_into().unwrap()), 24);
+        assert_eq!(
+            u64::from_le_bytes(extra[4..12].try_into().unwrap()),
+            10_000_000_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(extra[12..20].try_into().unwrap()),
+            5_000_000_000
+        );
+        assert_eq!(u64::from_le_bytes(extra[20..28].try_into().unwrap()), 0);
     }
 
     #[test]
@@ -772,41 +783,25 @@ mod tests {
         let name_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
         let extra_len = u16::from_le_bytes(data[30..32].try_into().unwrap()) as usize;
 
-        // Extra must be larger than ZIP64 alone (i.e., timestamp is preserved)
-        assert!(
-            extra_len > 20,
-            "expected extra_len > 20 (ZIP64 only), got {extra_len}"
+        // UT (9 bytes) + ZIP64 (28 bytes) = 37 bytes
+        assert_eq!(
+            extra_len, 37,
+            "expected 37-byte combined extra, got {extra_len}"
         );
 
         let extra_start = 46 + name_len;
         let extra_data = &data[extra_start..extra_start + extra_len];
 
-        // Find ZIP64 extra field header (0x0001) — should appear after UT
-        let has_z64 = extra_data.windows(4).any(|w| {
-            let tag = u16::from_le_bytes(w[0..2].try_into().unwrap());
-            tag == 0x0001
-        });
-        assert!(
-            has_z64,
-            "ZIP64 extra (0x0001) missing from serialized extra field"
+        // UT should come first
+        assert_eq!(&extra_data[0..2], b"UT");
+        // ZIP64 should follow at offset 9
+        assert_eq!(
+            u16::from_le_bytes(extra_data[9..11].try_into().unwrap()),
+            0x0001
         );
-
-        // Find extended timestamp extra field header (0x5455)
-        let has_ts = extra_data.windows(4).any(|w| w[0] == 0x55 && w[1] == 0x54);
-        assert!(
-            has_ts,
-            "extended timestamp extra (0x5455) missing from serialized extra field"
-        );
-
-        // ZIP64 should appear AFTER timestamp extra in the stream
-        let z64_pos = extra_data
-            .windows(2)
-            .position(|w| w == &[0x01, 0x00])
-            .unwrap();
-        let ts_pos = extra_data.windows(2).position(|w| w == b"UT").unwrap();
-        assert!(
-            ts_pos < z64_pos,
-            "expected UT extra before ZIP64 extra, but UT at {ts_pos}, ZIP64 at {z64_pos}"
+        assert_eq!(
+            u16::from_le_bytes(extra_data[11..13].try_into().unwrap()),
+            24
         );
     }
 

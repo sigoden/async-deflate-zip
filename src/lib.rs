@@ -37,6 +37,6 @@ mod writer;
 
 pub use error::ZipError;
 pub use types::CompressionLevel;
-pub use writer::DirectoryEntryWriter;
+pub use writer::DirectoryWriter;
 pub use writer::EntryWriter;
 pub use writer::ZipWriter;

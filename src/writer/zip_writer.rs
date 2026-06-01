@@ -5,7 +5,7 @@ use crate::types::CompressionLevel;
 use async_compression::tokio::write::DeflateEncoder;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use super::directory_writer::DirectoryEntryWriter;
+use super::directory_writer::DirectoryWriter;
 use super::entry_writer::EntryWriter;
 use super::helpers::{CountWriter, ShutdownIgnoredWriter};
 use super::stored_entry::StoredEntry;
@@ -152,8 +152,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
     /// Start a new directory entry.
     ///
-    /// Writes the Local File Header and returns a [`DirectoryEntryWriter`] handle.
-    /// Call [`close`](DirectoryEntryWriter::close) to finalize the entry.
+    /// Writes the Local File Header and returns a [`DirectoryWriter`] handle.
+    /// Call [`close`](DirectoryWriter::close) to finalize the entry.
     /// Directory names should end with `'/'`.
     ///
     /// # Errors
@@ -177,7 +177,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     pub async fn append_directory<'a>(
         &'a mut self,
         name: &str,
-    ) -> Result<DirectoryEntryWriter<'a, W>, ZipError> {
+    ) -> Result<DirectoryWriter<'a, W>, ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
                 ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
@@ -192,7 +192,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         let offset = self.pos;
         self.pos += lfh_bytes.len() as u64;
 
-        Ok(DirectoryEntryWriter {
+        Ok(DirectoryWriter {
             zip: self,
             writer: Some(inner),
             name: name.to_string(),

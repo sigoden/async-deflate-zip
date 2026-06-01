@@ -14,7 +14,7 @@ use super::zip_writer::ZipWriter;
 ///
 /// Dropping without calling `close` leaves the archive in an inconsistent state
 /// and poisons the parent [`ZipWriter`].
-pub struct DirectoryEntryWriter<'a, W: AsyncWrite + Unpin> {
+pub struct DirectoryWriter<'a, W: AsyncWrite + Unpin> {
     pub(crate) zip: &'a mut ZipWriter<W>,
     pub(crate) writer: Option<W>,
     pub(crate) name: String,
@@ -23,7 +23,7 @@ pub struct DirectoryEntryWriter<'a, W: AsyncWrite + Unpin> {
     pub(crate) unix_permissions: Option<u32>,
 }
 
-impl<W: AsyncWrite + Unpin> DirectoryEntryWriter<'_, W> {
+impl<W: AsyncWrite + Unpin> DirectoryWriter<'_, W> {
     /// Set the modification time for this directory entry.
     pub fn set_mtime(&mut self, mtime: std::time::SystemTime) -> &mut Self {
         self.mtime = Some(mtime);
@@ -41,7 +41,7 @@ impl<W: AsyncWrite + Unpin> DirectoryEntryWriter<'_, W> {
 
     /// Finalize the directory entry by writing the Data Descriptor.
     ///
-    /// This consumes the `DirectoryEntryWriter`, writes the trailing Data Descriptor
+    /// This consumes the `DirectoryWriter`, writes the trailing Data Descriptor
     /// (CRC-32 and zero sizes), and returns the inner writer to the parent
     /// [`ZipWriter`].
     ///
@@ -98,7 +98,7 @@ impl<W: AsyncWrite + Unpin> DirectoryEntryWriter<'_, W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin> Drop for DirectoryEntryWriter<'_, W> {
+impl<W: AsyncWrite + Unpin> Drop for DirectoryWriter<'_, W> {
     fn drop(&mut self) {
         if self.writer.is_some() {
             // close() was never called — mark the ZipWriter as poisoned

@@ -26,10 +26,14 @@ impl StoredEntry {
             header::VERSION_DEFLATE
         };
 
-        let extra = match self.unix_mtime {
-            Some(ts) => header::build_extended_timestamp_extra(ts),
-            None => Vec::new(),
+        let mut extra = if !self.name.is_ascii() {
+            header::build_unicode_extra_field(&self.name)
+        } else {
+            Vec::new()
         };
+        if let Some(ts) = self.unix_mtime {
+            extra.extend(header::build_extended_timestamp_extra(ts));
+        }
 
         let file_type_bit: u32 = if self.is_symlink {
             0o120000 // S_IFLNK
@@ -48,6 +52,11 @@ impl StoredEntry {
             || self.uncompressed_size > header::U32_MAX
             || self.local_header_offset > header::U32_MAX;
 
+        let mut flags = header::FLAG_DATA_DESC;
+        if !self.name.is_ascii() {
+            flags |= 1 << 11; // EFS / UTF-8 flag (bit 11), consistent with LocalFileHeader::new()
+        }
+
         header::CentralDirEntry {
             version_made_by,
             version_needed: if use_zip64 {
@@ -57,7 +66,7 @@ impl StoredEntry {
             } else {
                 header::VERSION_DEFLATE
             },
-            flags: header::FLAG_DATA_DESC,
+            flags,
             method: if self.is_directory || self.is_symlink || self.is_stored {
                 header::METHOD_STORED
             } else {

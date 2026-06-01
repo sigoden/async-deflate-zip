@@ -134,6 +134,25 @@ pub(crate) fn build_extended_timestamp_extra(mtime: u64) -> Vec<u8> {
     buf
 }
 
+/// Build the Unicode extra field (ID `0x7075`) that explicitly stores the
+/// UTF-8 encoded filename.
+///
+/// Format: header_id (2) + data_size (2) + version (1) + name (N) = 5 + N bytes.
+/// This field ensures compatibility with unzip tools that ignore the EFS
+/// flag (bit 11) and instead rely on the extra field to detect UTF-8 filenames.
+///
+/// Only emitted when the filename contains non-ASCII characters.
+pub(crate) fn build_unicode_extra_field(name: &str) -> Vec<u8> {
+    let name_bytes = name.as_bytes();
+    let data_size = 1 + name_bytes.len();
+    let mut buf = Vec::with_capacity(4 + data_size);
+    put_u16(&mut buf, 0x7075); // Unicode extra field header ID
+    put_u16(&mut buf, data_size as u16);
+    put_u8(&mut buf, 1); // version 1
+    buf.extend_from_slice(name_bytes);
+    buf
+}
+
 /// Convert an optional `SystemTime` to MS-DOS date/time and Unix timestamp pair.
 ///
 /// Used by both `EntryWriter::close` and `DirectoryWriter::close` to convert
@@ -215,10 +234,16 @@ impl LocalFileHeader {
             time,
             date,
             name: name.as_bytes().to_vec(),
-            extra: if zip64 {
-                build_zip64_extra_lfh()
-            } else {
-                Vec::new()
+            extra: {
+                let mut extra = if !name.is_ascii() {
+                    build_unicode_extra_field(name)
+                } else {
+                    Vec::new()
+                };
+                if zip64 {
+                    extra.extend(build_zip64_extra_lfh());
+                }
+                extra
             },
         }
     }

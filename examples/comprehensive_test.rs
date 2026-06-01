@@ -328,8 +328,6 @@ async fn test_zip64_many_entries() {
 
     // Verify entry count via zipinfo/unzip or self-contained parser
     verify_zip_structure(&path, count).await;
-
-    println!("ZIP64 with {count} entries created successfully\n");
 }
 
 // ============================================================
@@ -488,7 +486,17 @@ async fn verify_zip_structure(path: &Path, expected_entries: usize) {
             .filter(|l| l.starts_with("    testing:"))
             .count();
 
-        if count < 10 {
+        let lines: Vec<&str> = output.lines().collect();
+        if lines.len() > 10 {
+            for line in &lines[..5] {
+                println!("{line}");
+            }
+            println!("    ...");
+            for line in &lines[lines.len() - 5..] {
+                println!("{line}");
+            }
+            println!();
+        } else {
             println!("{output}");
         }
 

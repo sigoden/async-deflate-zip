@@ -1,0 +1,431 @@
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use flate2::{Compress, Compression, FlushCompress, Status};
+use tokio::io::AsyncWrite;
+
+/// Async-only Deflate encoder implementing `tokio::io::AsyncWrite`.
+///
+/// Wraps an inner `AsyncWrite` and compresses data written through it
+/// using the DEFLATE algorithm (raw deflate, no zlib header/trailer).
+/// Used internally by `ZipWriter` to compress ZIP entry data.
+///
+/// # Shutdown behavior
+///
+/// `poll_shutdown` finalizes the deflate stream and drains any remaining
+/// compressed output to the inner writer, but does NOT propagate shutdown
+/// to the inner writer. This allows the caller (EntryWriter::close) to
+/// write a ZIP Data Descriptor after the compressed data stream.
+pub(crate) struct DeflateEncoder<W: AsyncWrite + Unpin> {
+    inner: W,
+    compress: Compress,
+    out_buf: Vec<u8>,
+    /// Number of bytes from `out_buf[0..out_len]` already written to inner.
+    out_pos: usize,
+    /// Number of valid compressed bytes in `out_buf`.
+    out_len: usize,
+    finished: bool,
+}
+
+impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
+    /// Create a new `DeflateEncoder` wrapping `inner` with the given compression level.
+    pub(crate) fn new(inner: W, level: Compression) -> Self {
+        Self {
+            inner,
+            // false = raw deflate (no zlib header/trailer)
+            compress: Compress::new(level, false),
+            out_buf: vec![0u8; 8192],
+            out_pos: 0,
+            out_len: 0,
+            finished: false,
+        }
+    }
+
+    /// Get a shared reference to the inner writer.
+    #[allow(dead_code)]
+    pub(crate) fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
+    /// Consume the encoder and return the inner writer.
+    pub(crate) fn into_inner(self) -> W {
+        self.inner
+    }
+
+    /// Drain pending data in `out_buf[out_pos..out_len]` to the inner writer.
+    ///
+    /// Returns `Poll::Ready(Ok(()))` once all buffered output has been written,
+    /// or `Poll::Pending` if the inner writer cannot accept more data.
+    fn poll_drain(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.out_pos < self.out_len {
+            let this = self.as_mut().get_mut();
+            match Pin::new(&mut this.inner)
+                .poll_write(cx, &this.out_buf[this.out_pos..this.out_len])
+            {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "underlying writer returned 0 bytes",
+                    )))
+                }
+                Poll::Ready(Ok(n)) => this.out_pos += n,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        let this = self.as_mut().get_mut();
+        this.out_pos = 0;
+        this.out_len = 0;
+        Poll::Ready(Ok(()))
+    }
+
+    /// Compress `input` into the internal output buffer with the given flush mode.
+    ///
+    /// Returns the number of bytes consumed from `input` and the flate2 `Status`.
+    fn do_compress(&mut self, input: &[u8], flush: FlushCompress) -> io::Result<(usize, Status)> {
+        let before_in = self.compress.total_in();
+        let before_out = self.compress.total_out();
+
+        let status = self
+            .compress
+            .compress(input, &mut self.out_buf, flush)
+            .map_err(io::Error::other)?;
+
+        let consumed = (self.compress.total_in() - before_in) as usize;
+        let produced = (self.compress.total_out() - before_out) as usize;
+
+        // Mark the newly produced bytes for subsequent drain.
+        self.out_pos = 0;
+        self.out_len = produced;
+
+        if matches!(status, Status::BufError) && consumed == 0 && produced == 0 {
+            return Err(io::Error::other("flate2 BufError with no progress"));
+        }
+
+        Ok((consumed, status))
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        // After shutdown, only empty writes are accepted (return Ok(0)).
+        // Non-empty writes after shutdown are rejected.
+        if self.finished {
+            return if buf.is_empty() {
+                Poll::Ready(Ok(0))
+            } else {
+                Poll::Ready(Err(io::Error::other("write after shutdown")))
+            };
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // Drain any remaining output from a previous compression call first
+        if self.out_pos < self.out_len {
+            match self.as_mut().poll_drain(cx) {
+                Poll::Ready(Ok(())) => {}
+                other => return other.map(|r| r.map(|_| 0)),
+            }
+        }
+
+        let this = self.as_mut().get_mut();
+        let (consumed, _status) = this.do_compress(buf, FlushCompress::None)?;
+
+        // Eagerly drain newly produced output (non-blocking best-effort)
+        if this.out_pos < this.out_len {
+            let _ = self.as_mut().poll_drain(cx);
+        }
+
+        Poll::Ready(Ok(consumed))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.finished {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Drain existing buffered output
+        if self.out_pos < self.out_len {
+            match self.as_mut().poll_drain(cx) {
+                Poll::Ready(Ok(())) => {}
+                other => return other,
+            }
+        }
+
+        // Flush compressor internal state
+        loop {
+            let this = self.as_mut().get_mut();
+            let (_, status) = this.do_compress(&[], FlushCompress::Sync)?;
+
+            if this.out_pos < this.out_len {
+                match self.as_mut().poll_drain(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    other => return other,
+                }
+            }
+
+            match status {
+                Status::Ok | Status::StreamEnd => break,
+                Status::BufError => continue,
+            }
+        }
+
+        // Do NOT propagate flush to inner writer — the caller manages
+        // flush of the inner writer (e.g., ZipWriter finalize).
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.finished {
+            // Drain existing buffered output
+            if self.out_pos < self.out_len {
+                match self.as_mut().poll_drain(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    other => return other,
+                }
+            }
+
+            // Finish deflate stream (write end-of-stream markers)
+            loop {
+                let this = self.as_mut().get_mut();
+                let (_, status) = this.do_compress(&[], FlushCompress::Finish)?;
+
+                if this.out_pos < this.out_len {
+                    match self.as_mut().poll_drain(cx) {
+                        Poll::Ready(Ok(())) => {}
+                        other => return other,
+                    }
+                }
+
+                match status {
+                    Status::StreamEnd => break,
+                    Status::Ok | Status::BufError => continue,
+                }
+            }
+
+            self.get_mut().finished = true;
+        }
+
+        // Do NOT propagate shutdown to inner writer.
+        // The caller (EntryWriter::close) writes the Data Descriptor
+        // after the compressed stream, so the inner writer must remain open.
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: drain output from encoder into a Vec.
+    async fn compress(data: &[u8], level: Compression) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut encoder = DeflateEncoder::new(&mut buf, level);
+        tokio::io::AsyncWriteExt::write_all(&mut encoder, data)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut encoder)
+            .await
+            .unwrap();
+        drop(encoder);
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_encoder_produces_valid_deflate() {
+        let data = b"Hello, World! This is a test of the deflate encoder.";
+        let compressed = compress(data, Compression::default()).await;
+
+        // Decompress and verify using raw API (decompress_vec may have portability issues)
+        let mut decompressor = flate2::Decompress::new(false);
+        let mut raw_out = [0u8; 8192];
+        let (mut in_pos, mut out_len) = (0, 0);
+        loop {
+            let in_bytes = &compressed[in_pos..];
+            let out_bytes = &mut raw_out[out_len..];
+            let result = decompressor
+                .decompress(in_bytes, out_bytes, flate2::FlushDecompress::Finish)
+                .unwrap();
+            in_pos = decompressor.total_in() as usize;
+            out_len = decompressor.total_out() as usize;
+            match result {
+                flate2::Status::StreamEnd => break,
+                flate2::Status::Ok | flate2::Status::BufError => continue,
+            }
+        }
+        assert_eq!(
+            &raw_out[..out_len],
+            data,
+            "round-trip should produce original data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encoder_compresses_repeated_data() {
+        let data = vec![b'A'; 4096];
+        let compressed = compress(&data, Compression::best()).await;
+        assert!(
+            compressed.len() < data.len(),
+            "compressed size {} should be less than uncompressed {}",
+            compressed.len(),
+            data.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encoder_no_compression_level_0() {
+        let data = vec![b'A'; 1024];
+        let compressed = compress(&data, Compression::none()).await;
+        assert!(
+            compressed.len() >= data.len(),
+            "level 0 should not compress (got {} < {})",
+            compressed.len(),
+            data.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encoder_empty_input() {
+        let data = b"";
+        let compressed = compress(data, Compression::default()).await;
+        // Empty input should still produce a valid deflate stream (end marker only)
+        assert!(
+            !compressed.is_empty(),
+            "empty input should produce deflate end marker"
+        );
+
+        // Verify it decompresses to empty
+        let mut decompressor = flate2::Decompress::new(false);
+        let mut raw_out = [0u8; 8192];
+        let (mut in_pos, mut out_len) = (0, 0);
+        loop {
+            let in_bytes = &compressed[in_pos..];
+            let out_bytes = &mut raw_out[out_len..];
+            let result = decompressor
+                .decompress(in_bytes, out_bytes, flate2::FlushDecompress::Finish)
+                .unwrap();
+            in_pos = decompressor.total_in() as usize;
+            out_len = decompressor.total_out() as usize;
+            match result {
+                flate2::Status::StreamEnd => break,
+                flate2::Status::Ok | flate2::Status::BufError => continue,
+            }
+        }
+        assert!(out_len == 0, "decompressed should be empty");
+    }
+
+    #[tokio::test]
+    async fn test_encoder_large_data() {
+        // 100KB of varied data
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 256) as u8).collect();
+        let compressed = compress(&data, Compression::default()).await;
+        assert!(
+            compressed.len() < data.len(),
+            "100KB of cyclic data should compress"
+        );
+
+        let mut decompressor = flate2::Decompress::new(false);
+        let mut raw_out = vec![0u8; data.len() + 8192];
+        let (mut in_pos, mut out_len) = (0, 0);
+        loop {
+            let in_bytes = &compressed[in_pos..];
+            let out_bytes = &mut raw_out[out_len..];
+            let result = decompressor
+                .decompress(in_bytes, out_bytes, flate2::FlushDecompress::Finish)
+                .unwrap();
+            in_pos = decompressor.total_in() as usize;
+            out_len = decompressor.total_out() as usize;
+            match result {
+                flate2::Status::StreamEnd => break,
+                flate2::Status::Ok | flate2::Status::BufError => continue,
+            }
+        }
+        assert_eq!(
+            &raw_out[..out_len],
+            &data[..],
+            "round-trip should match for large data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_does_not_propagate_to_inner() {
+        // Create a writer that tracks whether shutdown was called
+        struct ShutdownTracker {
+            data: Vec<u8>,
+            shutdown_called: bool,
+        }
+
+        impl AsyncWrite for ShutdownTracker {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.data.extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                self.shutdown_called = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let tracker = ShutdownTracker {
+            data: Vec::new(),
+            shutdown_called: false,
+        };
+        let mut encoder = DeflateEncoder::new(tracker, Compression::default());
+        tokio::io::AsyncWriteExt::write_all(&mut encoder, b"test data")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut encoder)
+            .await
+            .unwrap();
+
+        // After shutdown, the inner writer's shutdown should NOT have been called
+        assert!(
+            !encoder.get_ref().shutdown_called,
+            "encoder should not propagate shutdown to inner"
+        );
+
+        // The compressed data should be in the inner writer
+        assert!(
+            !encoder.get_ref().data.is_empty(),
+            "compressed data should be available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_into_inner_after_shutdown() {
+        let mut buf = Vec::new();
+        let mut encoder = DeflateEncoder::new(&mut buf, Compression::default());
+        tokio::io::AsyncWriteExt::write_all(&mut encoder, b"hello")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut encoder)
+            .await
+            .unwrap();
+
+        let inner = encoder.into_inner();
+        // We can still write to the inner after shutdown since it wasn't propagated.
+        // The buf should now contain: [deflate bytes for "hello"] + b" after"
+        assert!(
+            !inner.is_empty(),
+            "compressed data should have been written before shutdown"
+        );
+        // No assertion on exact content — deflate output is implementation-specific.
+    }
+}

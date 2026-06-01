@@ -12,7 +12,7 @@
 //!   zip ./my-project -0              → my-project.zip  (store, no compression)
 //!   zip ./my-project -9 ./out.zip    → out.zip         (max compression)
 
-use async_deflate_zip::{CompressionLevel, ZipWriter};
+use async_deflate_zip::{Compression, ZipWriter};
 use std::env;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -29,20 +29,18 @@ async fn main() {
 
     let target_dir = PathBuf::from(&args[1]);
 
-    let mut compression_level = CompressionLevel::DEFAULT;
+    let mut compression = Compression::default();
     let mut output_path: Option<PathBuf> = None;
 
     for arg in &args[2..] {
         if let Some(level_str) = arg.strip_prefix('-') {
             if level_str.len() == 1 && level_str.as_bytes()[0].is_ascii_digit() {
                 let level: u8 = level_str.parse().unwrap();
-                match CompressionLevel::try_new(level) {
-                    Ok(l) => compression_level = l,
-                    Err(e) => {
-                        eprintln!("Error: Invalid compression level: {e}");
-                        std::process::exit(1);
-                    }
+                if level > 9 {
+                    eprintln!("Error: Invalid compression level: {level} (valid range 0-9)");
+                    std::process::exit(1);
                 }
+                compression = Compression::new(level as u32);
                 continue;
             }
             eprintln!("Warning: ignore unrecognized flag '{arg}'");
@@ -69,7 +67,7 @@ async fn main() {
     }
 
     let file = fs::File::create(&output_path).await.unwrap();
-    let mut zip = ZipWriter::new(file).with_compression_level(compression_level);
+    let mut zip = ZipWriter::new(file).with_level(compression);
 
     if let Err(e) = add_dir(&mut zip, &target_dir, &target_dir).await {
         eprintln!("Error: {e}");

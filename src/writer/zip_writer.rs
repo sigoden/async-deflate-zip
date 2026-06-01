@@ -1,13 +1,13 @@
+use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
 use crate::header;
-use crate::types::CompressionLevel;
 
-use async_compression::tokio::write::DeflateEncoder;
+use flate2::Compression;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::directory_writer::DirectoryWriter;
 use super::entry_writer::EntryWriter;
-use super::helpers::{CountWriter, ShutdownIgnoredWriter};
+use super::helpers::CountWriter;
 use super::stored_entry::StoredEntry;
 
 /// A streaming ZIP archive writer with per-file deflate compression.
@@ -37,7 +37,7 @@ use super::stored_entry::StoredEntry;
 pub struct ZipWriter<W: AsyncWrite + Unpin> {
     pub(crate) inner: Option<W>,
     pub(crate) entries: Vec<StoredEntry>,
-    level: u8,
+    level: Compression,
     pub(crate) pos: u64,
     pub(crate) poisoned: bool,
 }
@@ -45,13 +45,13 @@ pub struct ZipWriter<W: AsyncWrite + Unpin> {
 impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// Create a new `ZipWriter` wrapping an async writer.
     ///
-    /// Uses the default compression level ([`CompressionLevel::DEFAULT`], level 6).
-    /// Use [`with_compression_level`](Self::with_compression_level) to customize.
+    /// Uses the default compression level ([`Compression::default`], level 6).
+    /// Use [`with_level`](Self::with_level) to customize.
     pub fn new(inner: W) -> Self {
         Self {
             inner: Some(inner),
             entries: Vec::new(),
-            level: CompressionLevel::DEFAULT.level(),
+            level: Compression::default(),
             pos: 0,
             poisoned: false,
         }
@@ -64,14 +64,14 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::{ZipWriter, CompressionLevel};
+    /// use async_deflate_zip::{ZipWriter, Compression};
     ///
     /// let mut buf = Vec::new();
     /// let zip = ZipWriter::new(&mut buf)
-    ///     .with_compression_level(CompressionLevel::BEST);
+    ///     .with_level(Compression::best());
     /// ```
-    pub fn with_compression_level(mut self, level: CompressionLevel) -> Self {
-        self.level = level.level();
+    pub fn with_level(mut self, level: Compression) -> Self {
+        self.level = level;
         self
     }
 
@@ -110,7 +110,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             }
         })?;
 
-        let is_stored = self.level == 0;
+        let is_stored = self.level.level() == 0;
         let method = if is_stored {
             header::METHOD_STORED
         } else {
@@ -128,9 +128,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             (None, Some(CountWriter { inner, count: 0 }))
         } else {
             (
-                Some(DeflateEncoder::with_quality(
-                    ShutdownIgnoredWriter(CountWriter { inner, count: 0 }),
-                    async_compression::Level::Precise(self.level as i32),
+                Some(DeflateEncoder::new(
+                    CountWriter { inner, count: 0 },
+                    self.level,
                 )),
                 None,
             )
@@ -351,7 +351,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 mod tests {
     use super::*;
     use crate::writer::test_utils::lookup_entry;
-    use crate::CompressionLevel;
+    use flate2::Compression;
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn test_zip_compression_ratio() {
         let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf).with_compression_level(CompressionLevel::BEST);
+        let mut zip = ZipWriter::new(&mut buf).with_level(Compression::best());
 
         let data = vec![b'A'; 1024];
         let mut entry = zip.append_file("repeated.txt").await.unwrap();
@@ -446,7 +446,7 @@ mod tests {
     async fn test_zip64_finalize_many_entries() {
         let num_entries: u16 = 0xFFFF;
         let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf).with_compression_level(CompressionLevel::NONE);
+        let mut zip = ZipWriter::new(&mut buf).with_level(Compression::none());
 
         for i in 0..=num_entries {
             let name = format!("f{i}");
@@ -494,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn test_stored_entry_level_zero() {
         let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf).with_compression_level(CompressionLevel::NONE);
+        let mut zip = ZipWriter::new(&mut buf).with_level(Compression::none());
 
         let data = b"Hello, stored entry!";
         let mut entry = zip.append_file("stored.txt").await.unwrap();

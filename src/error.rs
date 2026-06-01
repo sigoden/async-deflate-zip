@@ -25,9 +25,6 @@ pub enum ZipError {
 
     /// The archive writer is in a state that does not allow the requested operation.
     InvalidState(String),
-
-    /// An invalid deflate compression level was provided (valid range: 0-9).
-    InvalidCompressionLevel(u8),
 }
 
 impl fmt::Display for ZipError {
@@ -39,9 +36,6 @@ impl fmt::Display for ZipError {
             }
             Self::Poisoned(msg) => write!(f, "archive corrupted: {msg}"),
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
-            Self::InvalidCompressionLevel(level) => {
-                write!(f, "invalid compression level: {level} (valid range 0-9)")
-            }
         }
     }
 }
@@ -70,9 +64,6 @@ impl From<ZipError> for io::Error {
             ZipError::FieldTooLong { .. } => io::Error::new(io::ErrorKind::InvalidInput, err),
             ZipError::Poisoned(_) => io::Error::other(err),
             ZipError::InvalidState(_) => io::Error::new(io::ErrorKind::InvalidInput, err),
-            ZipError::InvalidCompressionLevel(_) => {
-                io::Error::new(io::ErrorKind::InvalidInput, err)
-            }
         }
     }
 }

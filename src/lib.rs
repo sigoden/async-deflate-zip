@@ -7,10 +7,10 @@
 //!
 //! # Architecture
 //!
-//! The crate is organized into four modules:
+//! The crate is organized into three modules:
 //!
 //! - [`ZipWriter`] — Streaming [`ZipWriter`] and per-entry [`EntryWriter`]
-//! - [`CompressionLevel`] — Deflate compression level (0-9)
+//! - [`Compression`] — Deflate compression level (0-9) (re-exported from `flate2`)
 //!
 //! # Quick Start
 //!
@@ -30,13 +30,13 @@
 //! # }
 //! ```
 
+mod deflate_encoder;
 mod error;
 mod header;
-mod types;
 mod writer;
 
 pub use error::ZipError;
-pub use types::CompressionLevel;
+pub use flate2::Compression;
 pub use writer::DirectoryWriter;
 pub use writer::EntryWriter;
 pub use writer::ZipWriter;

@@ -1,7 +1,7 @@
 //! Comprehensive test for async-deflate-zip library.
 //!
 //! Tests all public APIs:
-//! - ZipWriter::new / ZipWriter::with_compression_level
+//! - ZipWriter::new / ZipWriter::with_level
 //! - ZipWriter::append_file → EntryWriter (write, set_mtime, set_permissions, close)
 //! - ZipWriter::append_directory → DirectoryWriter (set_mtime, set_permissions, close)
 //! - ZipWriter::append_symlink
@@ -12,7 +12,7 @@
 //! Every test writes the archive directly to a temp file and validates it
 //! with system `unzip -t` / `zipinfo` tools — no in-memory buffer.
 
-use async_deflate_zip::{CompressionLevel, ZipWriter};
+use async_deflate_zip::{Compression, ZipWriter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tokio::io::AsyncWriteExt;
@@ -36,16 +36,16 @@ async fn test_basic_single_file() {
 }
 
 // ============================================================
-// Test 2: All CompressionLevel constants
+// Test 2: All Compression constants
 // ============================================================
 async fn test_compression_levels() {
     println!("--- Test 2: All compression levels ---");
 
-    let levels: Vec<(&str, CompressionLevel)> = vec![
-        ("NONE", CompressionLevel::NONE),
-        ("FAST", CompressionLevel::FAST),
-        ("DEFAULT", CompressionLevel::DEFAULT),
-        ("BEST", CompressionLevel::BEST),
+    let levels: Vec<(&str, Compression)> = vec![
+        ("NONE", Compression::none()),
+        ("FAST", Compression::fast()),
+        ("DEFAULT", Compression::default()),
+        ("BEST", Compression::best()),
     ];
 
     let data = vec![b'A'; 10_000]; // highly compressible
@@ -53,7 +53,7 @@ async fn test_compression_levels() {
     for (label, level) in &levels {
         let path = zip_out_path(&format!("02_test_compression_levels_{label}"));
         let file = tokio::fs::File::create(&path).await.unwrap();
-        let mut zip = ZipWriter::new(file).with_compression_level(*level);
+        let mut zip = ZipWriter::new(file).with_level(*level);
         let mut entry = zip.append_file(&format!("data_{label}.bin")).await.unwrap();
         entry.write_all(&data).await.unwrap();
         entry.close().await.unwrap();
@@ -258,7 +258,7 @@ async fn test_stored_entry() {
     println!("--- Test 8: Stored entry (level=NONE / method=STORED) ---");
     let path = zip_out_path("08_test_stored_entry");
     let file = tokio::fs::File::create(&path).await.unwrap();
-    let mut zip = ZipWriter::new(file).with_compression_level(CompressionLevel::NONE);
+    let mut zip = ZipWriter::new(file).with_level(Compression::none());
 
     let mut entry = zip.append_file("stored.bin").await.unwrap();
     entry.write_all(&[0xFF; 500]).await.unwrap();
@@ -280,8 +280,8 @@ async fn test_builder_chain() {
     println!("--- Test 9: Builder chain ---");
     let path = zip_out_path("09_test_builder_chain");
     let file = tokio::fs::File::create(&path).await.unwrap();
-    // Chaining: new → with_compression_level → append_file
-    let mut zip = ZipWriter::new(file).with_compression_level(CompressionLevel::BEST);
+    // Chaining: new → with_level → append_file
+    let mut zip = ZipWriter::new(file).with_level(Compression::best());
     let mut entry = zip.append_file("chained.txt").await.unwrap();
     entry.write_all(b"builder pattern test").await.unwrap();
     entry.close().await.unwrap();
@@ -297,7 +297,7 @@ async fn test_zip64_many_entries() {
     println!("--- Test 10: Many entries (>=65535) to trigger ZIP64 via count ---");
     let path = zip_out_path("10_test_zip64_many_entries");
     let file = tokio::fs::File::create(&path).await.unwrap();
-    let mut zip = ZipWriter::new(file).with_compression_level(CompressionLevel::NONE);
+    let mut zip = ZipWriter::new(file).with_level(Compression::none());
 
     let count = 0xFFFF + 1; // 65536 entries — exceeds the 16-bit limit
     for i in 0..count {
@@ -358,7 +358,7 @@ async fn test_large_file_zip64() {
 
     // Open the output zip as a file, then wrap in ZipWriter
     let out_file = tokio::fs::File::create(&output_zip).await.unwrap();
-    let mut zip = ZipWriter::new(out_file).with_compression_level(CompressionLevel::DEFAULT);
+    let mut zip = ZipWriter::new(out_file).with_level(Compression::default());
 
     // Add the large file with a descriptive name
     {

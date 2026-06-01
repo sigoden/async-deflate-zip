@@ -5,10 +5,10 @@ use std::task::{Context, Poll};
 use crate::error::ZipError;
 use crate::header;
 
-use async_compression::tokio::write::DeflateEncoder;
+use crate::deflate_encoder::DeflateEncoder;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use super::helpers::{CountWriter, ShutdownIgnoredWriter};
+use super::helpers::CountWriter;
 use super::stored_entry::StoredEntry;
 use super::zip_writer::ZipWriter;
 
@@ -30,7 +30,7 @@ pin_project_lite::pin_project! {
     {
         pub(crate) zip: &'a mut ZipWriter<W>,
         #[pin]
-        pub(crate) deflate_encoder: Option<DeflateEncoder<ShutdownIgnoredWriter<CountWriter<W>>>>,
+        pub(crate) deflate_encoder: Option<DeflateEncoder<CountWriter<W>>>,
         #[pin]
         pub(crate) passthrough: Option<CountWriter<W>>,
         pub(crate) is_stored: bool,
@@ -105,8 +105,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             encoder.shutdown().await?;
 
             // Extract the inner writer from the encoder stack
-            let shutdown_writer: ShutdownIgnoredWriter<CountWriter<W>> = encoder.into_inner();
-            let count_writer: CountWriter<W> = shutdown_writer.0;
+            let count_writer: CountWriter<W> = encoder.into_inner();
             let compressed_size = count_writer.count;
             (compressed_size, count_writer.inner)
         };

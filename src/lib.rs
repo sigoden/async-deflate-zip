@@ -30,10 +30,12 @@
 //! # }
 //! ```
 
-pub(crate) mod header;
+mod error;
+mod header;
 mod types;
 mod writer;
 
+pub use error::ZipError;
 pub use types::CompressionLevel;
 pub use writer::DirectoryEntryWriter;
 pub use writer::EntryWriter;

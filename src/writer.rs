@@ -2,6 +2,8 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::error::ZipError;
+
 use async_compression::tokio::write::DeflateEncoder;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -104,9 +106,15 @@ impl StoredEntry {
             (None, false) => 0,
         };
 
+        let use_zip64 = self.compressed_size > header::U32_MAX
+            || self.uncompressed_size > header::U32_MAX
+            || self.local_header_offset > header::U32_MAX;
+
         header::CentralDirEntry {
             version_made_by,
-            version_needed: if self.is_directory || self.is_symlink || self.is_stored {
+            version_needed: if use_zip64 {
+                header::VERSION_ZIP64
+            } else if self.is_directory || self.is_symlink || self.is_stored {
                 header::VERSION_STORED
             } else {
                 header::VERSION_DEFLATE
@@ -205,7 +213,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns `std::io::Error` if writing the Local File Header fails.
+    /// Returns [`ZipError`] if writer is poisoned, or if writing the
+    /// Local File Header fails (I/O error or field too long).
     ///
     /// # Example
     ///
@@ -222,14 +231,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
-    pub async fn append_file<'a>(&'a mut self, name: &str) -> io::Result<EntryWriter<'a, W>> {
+    pub async fn append_file<'a>(&'a mut self, name: &str) -> Result<EntryWriter<'a, W>, ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
-                io::Error::other(
-                    "archive corrupted: previous entry was dropped without calling close()",
-                )
+                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
             } else {
-                io::Error::other("entry writer already active")
+                ZipError::InvalidState("entry writer already active".to_string())
             }
         })?;
 
@@ -281,7 +288,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`std::io::Error`] if writing the Local File Header fails.
+    /// Returns [`ZipError`] if writer is poisoned, or if writing the
+    /// Local File Header fails (I/O error or field too long).
     ///
     /// # Example
     ///
@@ -299,14 +307,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     pub async fn append_directory<'a>(
         &'a mut self,
         name: &str,
-    ) -> io::Result<DirectoryEntryWriter<'a, W>> {
+    ) -> Result<DirectoryEntryWriter<'a, W>, ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
-                io::Error::other(
-                    "archive corrupted: previous entry was dropped without calling close()",
-                )
+                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
             } else {
-                io::Error::other("entry writer already active")
+                ZipError::InvalidState("entry writer already active".to_string())
             }
         })?;
         let needs_zip64 = self.pos > header::U32_MAX;
@@ -336,8 +342,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`std::io::Error`] if writing the Local File Header, the symlink
-    /// target data, or the Data Descriptor fails.
+    /// Returns [`ZipError`] if writer is poisoned, or if writing the
+    /// Local File Header, symlink target, or Data Descriptor fails (I/O error
+    /// or field too long).
     ///
     /// # Example
     ///
@@ -351,14 +358,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
-    pub async fn append_symlink(&mut self, name: &str, target: &str) -> io::Result<()> {
+    pub async fn append_symlink(&mut self, name: &str, target: &str) -> Result<(), ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
-                io::Error::other(
-                    "archive corrupted: previous entry was dropped without calling close()",
-                )
+                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
             } else {
-                io::Error::other("entry writer already active")
+                ZipError::InvalidState("entry writer already active".to_string())
             }
         })?;
         let needs_zip64 = self.pos > header::U32_MAX;
@@ -417,21 +422,15 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`std::io::Error`] if writing the Central Directory or EOCDR fails,
-    /// or if the inner writer's shutdown fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the inner writer is not available
-    /// (i.e., an `EntryWriter` is still active and hasn't been closed).
-    pub async fn finalize(mut self) -> io::Result<()> {
+    /// Returns [`ZipError`] if an entry writer is still active or the writer is
+    /// poisoned, if writing the Central Directory or EOCDR fails (I/O error or
+    /// field too long), or if the inner writer's shutdown fails.
+    pub async fn finalize(mut self) -> Result<(), ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
-                io::Error::other(
-                    "archive corrupted: previous entry was dropped without calling close()",
-                )
+                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
             } else {
-                io::Error::other("entry writer still active")
+                ZipError::InvalidState("entry writer still active".to_string())
             }
         })?;
         let cd_offset = self.pos;
@@ -518,12 +517,12 @@ impl<W: AsyncWrite + Unpin> DirectoryEntryWriter<'_, W> {
     ///
     /// # Errors
     ///
-    /// Returns an error if `close` is called more than once.
-    pub async fn close(mut self) -> io::Result<()> {
+    /// Returns [`ZipError`] if `close` is called more than once.
+    pub async fn close(mut self) -> Result<(), ZipError> {
         let mut inner = self
             .writer
             .take()
-            .ok_or_else(|| io::Error::other("directory entry already closed"))?;
+            .ok_or_else(|| ZipError::InvalidState("directory entry already closed".to_string()))?;
 
         let dd = header::DataDescriptor {
             crc32: 0,
@@ -532,7 +531,10 @@ impl<W: AsyncWrite + Unpin> DirectoryEntryWriter<'_, W> {
             zip64: self.local_header_offset > header::U32_MAX,
         };
         let dd_bytes = dd.serialize();
-        inner.write_all(&dd_bytes).await?;
+        inner.write_all(&dd_bytes).await.map_err(|e| {
+            self.zip.poisoned = true;
+            ZipError::Io(e)
+        })?;
         self.zip.pos += dd_bytes.len() as u64;
 
         let (mtime_msdos, unix_mtime) = match self.mtime {
@@ -652,24 +654,21 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
     ///
     /// # Errors
     ///
-    /// Returns [`std::io::Error`] if the deflate encoder fails to shut down, or if
-    /// writing the Data Descriptor fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `close` is called more than once on the same entry.
-    pub async fn close(mut self) -> io::Result<()> {
+    /// Returns [`ZipError`] if `close` is called more than once, if the deflate
+    /// encoder fails to shut down (I/O error), or if writing the Data
+    /// Descriptor fails (I/O error).
+    pub async fn close(mut self) -> Result<(), ZipError> {
         let (compressed_size, mut inner) = if self.is_stored {
             let cw = self
                 .passthrough
                 .take()
-                .ok_or_else(|| io::Error::other("entry already closed"))?;
+                .ok_or_else(|| ZipError::InvalidState("entry already closed".to_string()))?;
             (cw.count, cw.inner)
         } else {
             let mut encoder = self
                 .deflate_encoder
                 .take()
-                .ok_or_else(|| io::Error::other("entry already closed"))?;
+                .ok_or_else(|| ZipError::InvalidState("entry already closed".to_string()))?;
             encoder.shutdown().await?;
 
             // Extract the inner writer from the encoder stack
@@ -692,7 +691,10 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
                 || self.local_header_offset > header::U32_MAX,
         };
         let dd_bytes = dd.serialize();
-        inner.write_all(&dd_bytes).await?;
+        inner.write_all(&dd_bytes).await.map_err(|e| {
+            self.zip.poisoned = true;
+            ZipError::Io(e)
+        })?;
 
         // Update position tracker: compressed data + data descriptor
         self.zip.pos += compressed_size + dd_bytes.len() as u64;
@@ -741,12 +743,24 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
         let result = if *this.is_stored {
             match this.passthrough.as_pin_mut() {
                 Some(w) => w.poll_write(cx, buf),
-                None => return Poll::Ready(Err(io::Error::other("write after entry closed"))),
+                None => {
+                    this.zip.poisoned = true;
+                    return Poll::Ready(Err(ZipError::Poisoned(
+                        "write after entry closed".to_string(),
+                    )
+                    .into()));
+                }
             }
         } else {
             match this.deflate_encoder.as_pin_mut() {
                 Some(e) => e.poll_write(cx, buf),
-                None => return Poll::Ready(Err(io::Error::other("write after entry closed"))),
+                None => {
+                    this.zip.poisoned = true;
+                    return Poll::Ready(Err(ZipError::Poisoned(
+                        "write after entry closed".to_string(),
+                    )
+                    .into()));
+                }
             }
         };
         match result {
@@ -764,12 +778,24 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
         if *this.is_stored {
             match this.passthrough.as_pin_mut() {
                 Some(w) => w.poll_flush(cx),
-                None => Poll::Ready(Err(io::Error::other("flush after entry closed"))),
+                None => {
+                    this.zip.poisoned = true;
+                    Poll::Ready(Err(ZipError::Poisoned(
+                        "flush after entry closed".to_string(),
+                    )
+                    .into()))
+                }
             }
         } else {
             match this.deflate_encoder.as_pin_mut() {
                 Some(e) => e.poll_flush(cx),
-                None => Poll::Ready(Err(io::Error::other("flush after entry closed"))),
+                None => {
+                    this.zip.poisoned = true;
+                    Poll::Ready(Err(ZipError::Poisoned(
+                        "flush after entry closed".to_string(),
+                    )
+                    .into()))
+                }
             }
         }
     }
@@ -779,12 +805,24 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
         if *this.is_stored {
             match this.passthrough.as_pin_mut() {
                 Some(w) => w.poll_shutdown(cx),
-                None => Poll::Ready(Err(io::Error::other("shutdown after entry closed"))),
+                None => {
+                    this.zip.poisoned = true;
+                    Poll::Ready(Err(ZipError::Poisoned(
+                        "shutdown after entry closed".to_string(),
+                    )
+                    .into()))
+                }
             }
         } else {
             match this.deflate_encoder.as_pin_mut() {
                 Some(e) => e.poll_shutdown(cx),
-                None => Poll::Ready(Err(io::Error::other("shutdown after entry closed"))),
+                None => {
+                    this.zip.poisoned = true;
+                    Poll::Ready(Err(ZipError::Poisoned(
+                        "shutdown after entry closed".to_string(),
+                    )
+                    .into()))
+                }
             }
         }
     }

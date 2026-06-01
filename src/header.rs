@@ -16,7 +16,7 @@
 //! All multi-byte values in the ZIP format are little-endian. Compression is
 //! indicated by the `method` field in each header.
 
-use std::io;
+use crate::error::ZipError;
 
 // === Constants ===
 
@@ -202,21 +202,20 @@ impl LocalFileHeader {
         }
     }
 
-    pub(crate) fn serialize(&self) -> io::Result<Vec<u8>> {
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>, ZipError> {
         if self.name.len() > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "LocalFileHeader filename too long: {} bytes",
-                    self.name.len()
-                ),
-            ));
+            return Err(ZipError::FieldTooLong {
+                field: "LocalFileHeader filename",
+                len: self.name.len(),
+                max: u16::MAX as usize,
+            });
         }
         if self.extra.len() > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("LocalFileHeader extra too long: {} bytes", self.extra.len()),
-            ));
+            return Err(ZipError::FieldTooLong {
+                field: "LocalFileHeader extra",
+                len: self.extra.len(),
+                max: u16::MAX as usize,
+            });
         }
         let mut buf = Vec::with_capacity(30 + self.name.len() + self.extra.len());
         put_u32(&mut buf, LFH_SIG);
@@ -307,15 +306,13 @@ pub(crate) struct CentralDirEntry {
 }
 
 impl CentralDirEntry {
-    pub(crate) fn serialize(&self) -> io::Result<Vec<u8>> {
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>, ZipError> {
         if self.name.len() > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "CentralDirEntry filename too long: {} bytes",
-                    self.name.len()
-                ),
-            ));
+            return Err(ZipError::FieldTooLong {
+                field: "CentralDirEntry filename",
+                len: self.name.len(),
+                max: u16::MAX as usize,
+            });
         }
 
         let use_zip64 = self.compressed_size > U32_MAX
@@ -335,10 +332,11 @@ impl CentralDirEntry {
         };
 
         if extra.len() > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("CentralDirEntry extra too long: {} bytes", extra.len()),
-            ));
+            return Err(ZipError::FieldTooLong {
+                field: "CentralDirEntry extra",
+                len: extra.len(),
+                max: u16::MAX as usize,
+            });
         }
 
         let mut buf = Vec::with_capacity(46 + self.name.len() + extra.len());

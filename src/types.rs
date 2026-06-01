@@ -4,6 +4,8 @@
 //!
 //! - [`CompressionLevel`] — DEFLATE compression level (0-9) with predefined constants
 
+use crate::error::ZipError;
+
 // === CompressionLevel ===
 
 /// Deflate compression level (0-9).
@@ -13,15 +15,6 @@
 ///
 /// Provides predefined constants [`NONE`](CompressionLevel::NONE),
 /// [`DEFAULT`](CompressionLevel::DEFAULT), and [`BEST`](CompressionLevel::BEST).
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use async_deflate_zip::CompressionLevel;
-///
-/// let level = CompressionLevel::new(4);
-/// assert_eq!(level.level(), 4);
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionLevel(u8);
 
@@ -44,12 +37,26 @@ impl CompressionLevel {
     /// Balanced trade-off between compression speed and ratio.
     pub const DEFAULT: Self = Self(6);
 
-    /// Create a new `CompressionLevel`.
+    /// Create a new `CompressionLevel` with validation.
     ///
-    /// Panics if the level is not in the range 0-9.
-    pub fn new(level: u8) -> Self {
-        assert!(level <= 9, "compression level must be 0-9");
-        Self(level)
+    /// Returns `Err(ZipError::InvalidCompressionLevel)` if the level is not
+    /// in the valid range 0–9.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use async_deflate_zip::CompressionLevel;
+    ///
+    /// let level = CompressionLevel::try_new(4).unwrap();
+    /// assert_eq!(level.level(), 4);
+    /// assert!(CompressionLevel::try_new(42).is_err());
+    /// ```
+    pub fn try_new(level: u8) -> Result<Self, ZipError> {
+        if level <= 9 {
+            Ok(Self(level))
+        } else {
+            Err(ZipError::InvalidCompressionLevel(level))
+        }
     }
 
     /// Return the raw compression level value (0-9).

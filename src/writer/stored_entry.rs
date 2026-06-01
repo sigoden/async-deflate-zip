@@ -211,9 +211,9 @@ mod tests {
         let entry = StoredEntry {
             name: "big.bin".to_string(),
             crc32: 0,
-            compressed_size: header::U32_MAX as u64 + 1,
-            uncompressed_size: header::U32_MAX as u64 + 1,
-            local_header_offset: header::U32_MAX as u64 + 1,
+            compressed_size: header::U32_MAX + 1,
+            uncompressed_size: header::U32_MAX + 1,
+            local_header_offset: header::U32_MAX + 1,
             is_directory: false,
             is_symlink: false,
             is_stored: false,

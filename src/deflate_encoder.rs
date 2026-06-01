@@ -67,7 +67,7 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "underlying writer returned 0 bytes",
-                    )))
+                    )));
                 }
                 Poll::Ready(Ok(n)) => this.out_pos += n,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),

@@ -1,6 +1,6 @@
 [package]
 name = "async-deflate-zip"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88.0"
 description = "Streaming async ZIP archive writer with per-file deflate compression"

@@ -88,35 +88,23 @@ async fn add_targets<W: AsyncWriteExt + Unpin>(
     }
 
     for target in targets {
+        let options = WriterOptions::from_path(target).await?;
+        let target_name = target
+            .file_name()
+            .unwrap_or_else(|| target.as_os_str())
+            .to_string_lossy()
+            .into_owned();
         if target.is_dir() {
-            let dir_name = target
-                .file_name()
-                .unwrap_or_else(|| target.as_os_str())
-                .to_string_lossy()
-                .into_owned();
-            let options = WriterOptions::from_path(target).await?;
-            zip.append_directory(&dir_name, options).await?;
-            Box::pin(add_dir(zip, target, target, Some(&dir_name))).await?;
+            zip.append_directory(&target_name, options).await?;
+            Box::pin(add_dir(zip, target, target, Some(&target_name))).await?;
         } else if target.is_file() {
-            let name = target
-                .file_name()
-                .unwrap_or_else(|| target.as_os_str())
-                .to_string_lossy()
-                .into_owned();
-            let zip_options = WriterOptions::from_path(target).await?;
-            let mut entry = zip.append_file(&name, zip_options).await?;
+            let mut entry = zip.append_file(&target_name, options).await?;
             let mut file = fs::File::open(target).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.close().await?;
         } else if target.is_symlink() {
-            let name = target
-                .file_name()
-                .unwrap_or_else(|| target.as_os_str())
-                .to_string_lossy()
-                .into_owned();
             let link_target = fs::read_link(target).await?;
-            let zip_options = WriterOptions::from_path(target).await?;
-            zip.append_symlink(&name, &link_target.to_string_lossy(), zip_options)
+            zip.append_symlink(&target_name, &link_target.to_string_lossy(), options)
                 .await?;
         }
     }
@@ -141,21 +129,19 @@ async fn add_dir<W: AsyncWriteExt + Unpin>(
         };
 
         let file_type = entry.file_type().await?;
-        let zip_options = WriterOptions::from_path(&path).await?;
-
+        let options = WriterOptions::from_path(&path).await?;
         if file_type.is_dir() {
-            zip.append_directory(&relative, zip_options).await?;
+            zip.append_directory(&relative, options).await?;
             Box::pin(add_dir(zip, base, &path, prefix)).await?;
         } else if file_type.is_file() {
-            let mut entry = zip.append_file(&relative, zip_options).await?;
+            let mut entry = zip.append_file(&relative, options).await?;
             let mut file = fs::File::open(&path).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.close().await?;
         } else if file_type.is_symlink() {
             let link_target = fs::read_link(&path).await?;
             let target_str = extract_relative_path(base, &link_target);
-            zip.append_symlink(&relative, &target_str, zip_options)
-                .await?;
+            zip.append_symlink(&relative, &target_str, options).await?;
         }
     }
 

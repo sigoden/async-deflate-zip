@@ -21,6 +21,7 @@ pub struct DirectoryWriter<'a, W: AsyncWrite + Unpin> {
     pub(crate) local_header_offset: u64,
     pub(crate) mtime: Option<std::time::SystemTime>,
     pub(crate) unix_permissions: Option<u32>,
+    pub(crate) uid_gid: Option<(u32, u32)>,
 }
 
 impl<W: AsyncWrite + Unpin> DirectoryWriter<'_, W> {
@@ -36,6 +37,15 @@ impl<W: AsyncWrite + Unpin> DirectoryWriter<'_, W> {
     /// The crate automatically adds the `S_IFDIR` file type bit.
     pub fn set_permissions(&mut self, mode: u32) -> &mut Self {
         self.unix_permissions = Some(mode & 0o7777);
+        self
+    }
+
+    /// Set Unix UID and GID for this directory entry.
+    ///
+    /// These values are stored in the 0x7875 (Unix UID/GID) extra field
+    /// in the Central Directory entry.
+    pub fn set_uid_gid(&mut self, uid: u32, gid: u32) -> &mut Self {
+        self.uid_gid = Some((uid, gid));
         self
     }
 
@@ -81,6 +91,8 @@ impl<W: AsyncWrite + Unpin> DirectoryWriter<'_, W> {
             mtime: mtime_msdos,
             unix_mtime,
             unix_permissions: self.unix_permissions,
+            uid_gid: self.uid_gid,
+            internal_file_attributes: 0,
         });
 
         self.zip.inner = Some(inner);

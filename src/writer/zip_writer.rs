@@ -147,6 +147,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             name: name.to_string(),
             mtime: None,
             unix_permissions: None,
+            uid_gid: None,
+            internal_file_attributes: 0,
         })
     }
 
@@ -199,6 +201,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             local_header_offset: offset,
             mtime: None,
             unix_permissions: None,
+            uid_gid: None,
         })
     }
 
@@ -279,6 +282,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             mtime: None,
             unix_mtime: None,
             unix_permissions: None,
+            uid_gid: None,
+            internal_file_attributes: 0,
         });
         self.inner = Some(inner);
         Ok(())
@@ -479,6 +484,7 @@ mod tests {
         let cd_count = buf.windows(4).filter(|w| w == b"PK\x01\x02").count();
         assert_eq!(cd_count, num_entries as usize + 1);
 
+        // LFH (30 + 2 name + 0 extra = 32) + 1 byte data + 16 DD = 49
         assert_eq!(
             &buf[33..37],
             b"PK\x07\x08",

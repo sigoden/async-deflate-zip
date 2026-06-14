@@ -24,6 +24,57 @@ fn parse_ut_extra(extra: &[u8]) -> Option<u64> {
     None
 }
 
+/// Parse the `0x7875` Unix UID/GID extra field.
+///
+/// Returns `None` if the field is absent or malformed.
+fn parse_ux_extra(extra: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 0;
+    while i + 4 <= extra.len() {
+        let tag = u16::from_le_bytes(extra[i..i + 2].try_into().unwrap());
+        let data_size = u16::from_le_bytes(extra[i + 2..i + 4].try_into().unwrap()) as usize;
+        if i + 4 + data_size > extra.len() {
+            break;
+        }
+        if tag == 0x7875 {
+            let ver = extra[i + 4];
+            if ver == 1 && data_size >= 5 {
+                let uid_size = extra[i + 5] as usize;
+                let uid = if uid_size >= 4 && i + 9 + 4 <= extra.len() {
+                    u32::from_le_bytes(extra[i + 6..i + 10].try_into().unwrap())
+                } else if uid_size > 0 && i + 6 + uid_size <= extra.len() {
+                    let mut buf = [0u8; 4];
+                    buf[..uid_size.min(4)].copy_from_slice(&extra[i + 6..i + 6 + uid_size.min(4)]);
+                    u32::from_le_bytes(buf)
+                } else {
+                    return None;
+                };
+                let gid_offset = i + 6 + uid_size;
+                let gid = if gid_offset < extra.len() {
+                    let gid_size = extra[gid_offset] as usize;
+                    if gid_size >= 4 && gid_offset + 1 + 4 <= extra.len() {
+                        u32::from_le_bytes(
+                            extra[gid_offset + 1..gid_offset + 5].try_into().unwrap(),
+                        )
+                    } else if gid_size > 0 && gid_offset + 1 + gid_size <= extra.len() {
+                        let mut buf = [0u8; 4];
+                        buf[..gid_size.min(4)].copy_from_slice(
+                            &extra[gid_offset + 1..gid_offset + 1 + gid_size.min(4)],
+                        );
+                        u32::from_le_bytes(buf)
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                };
+                return Some((uid, gid));
+            }
+        }
+        i += 4 + data_size;
+    }
+    None
+}
+
 /// Look up a Central Directory entry by index in a raw ZIP buffer.
 ///
 /// Parses all `StoredEntry` fields from the Central Directory record.
@@ -68,6 +119,13 @@ pub(crate) fn lookup_entry(buf: &[u8], index: usize) -> StoredEntry {
     let extra_start = 46 + name_len;
     let extra = &buf[pos + extra_start..pos + extra_start + extra_len];
     let unix_mtime = parse_ut_extra(extra);
+
+    // Parse UID/GID from 0x7875 extra field
+    let uid_gid = parse_ux_extra(extra);
+
+    // Parse internal file attributes (bit 0 = text file)
+    let internal_file_attributes = u16::from_le_bytes(cd[36..38].try_into().unwrap());
+
     // mtime is reconstructed only if we have enough info — keep as None
     // for now since we don't parse MS-DOS time from the CD header fields
     // back into a SystemTime.
@@ -85,5 +143,7 @@ pub(crate) fn lookup_entry(buf: &[u8], index: usize) -> StoredEntry {
         mtime,
         unix_mtime,
         unix_permissions,
+        uid_gid,
+        internal_file_attributes,
     }
 }

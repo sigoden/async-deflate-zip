@@ -10,7 +10,7 @@ Streaming async ZIP archive writer with per-file deflate compression.
 
 ```toml
 [dependencies]
-async-deflate-zip = "0.1.0"
+async-deflate-zip = "0.2.0"
 ```
 
 ```rust

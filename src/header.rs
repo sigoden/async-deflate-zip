@@ -17,6 +17,7 @@
 //! indicated by the `method` field in each header.
 
 use crate::error::ZipError;
+use std::time::SystemTime;
 
 // === Constants ===
 
@@ -93,20 +94,11 @@ pub(crate) fn put_u8(buf: &mut Vec<u8>, v: u8) {
 
 // === MS-DOS date/time ===
 
-/// Return the current time and date in MS-DOS format.
-///
-/// MS-DOS date/time packs into two 16-bit values:
-/// - **Time**: hours (5 bits), minutes (6 bits), seconds/2 (5 bits)
-/// - **Date**: year-1980 (7 bits), month (4 bits), day (5 bits)
-pub(crate) fn ms_dos_datetime() -> (u16, u16) {
-    system_time_to_ms_dos(std::time::SystemTime::now())
-}
-
 /// Convert a `SystemTime` to MS-DOS date/time format.
 ///
 /// Converts the UTC input to local time using the `time` crate before packing
 /// into MS-DOS format. Clamps year to the valid MS-DOS range [1980, 2107].
-pub(crate) fn system_time_to_ms_dos(t: std::time::SystemTime) -> (u16, u16) {
+pub(crate) fn system_time_to_ms_dos(t: SystemTime) -> (u16, u16) {
     let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
     let dt = time::OffsetDateTime::from(t).to_offset(local_offset);
     let y = dt.year().clamp(1980, 2107);
@@ -114,9 +106,9 @@ pub(crate) fn system_time_to_ms_dos(t: std::time::SystemTime) -> (u16, u16) {
     let day = dt.day() as u16;
     let hour = dt.hour() as u16;
     let minute = dt.minute() as u16;
-    let second = (dt.second() / 2) as u16;
+    let dos_sec = (dt.second() as u16).div_ceil(2);
     let date = ((y - 1980) as u16) << 9 | m << 5 | day;
-    let time = hour << 11 | minute << 5 | second;
+    let time = hour << 11 | minute << 5 | dos_sec;
     (time, date)
 }
 
@@ -169,25 +161,14 @@ pub(crate) fn build_unicode_extra_field(name: &str) -> Vec<u8> {
     buf
 }
 
-/// Convert an optional `SystemTime` to MS-DOS date/time and Unix timestamp pair.
-///
-/// Used by both `EntryWriter::close` and `DirectoryWriter::close` to convert
-/// the user-set mtime into the MS-DOS format stored in the Central Directory
-/// header and the Unix seconds stored in the extended timestamp extra field.
-pub(crate) fn mtime_to_ms_dos_and_unix(
-    mtime: Option<std::time::SystemTime>,
-) -> (Option<(u16, u16)>, Option<u64>) {
-    match mtime {
-        Some(t) => {
-            let (time, date) = system_time_to_ms_dos(t);
-            let secs = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            (Some((time, date)), Some(secs))
-        }
-        None => (None, None),
-    }
+/// Convert a `SystemTime` to MS-DOS date/time and Unix timestamp pair.
+pub(crate) fn mtime_to_ms_dos_and_unix(mtime: SystemTime) -> ((u16, u16), u64) {
+    let (time, date) = system_time_to_ms_dos(mtime);
+    let secs = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    ((time, date), secs)
 }
 
 // === Header structures ===
@@ -229,12 +210,16 @@ pub(crate) fn build_zip64_extra_lfh() -> Vec<u8> {
 }
 
 impl LocalFileHeader {
-    pub(crate) fn new(name: &str, method: u16, zip64: bool) -> Self {
-        let (time, date) = ms_dos_datetime();
+    pub(crate) fn new(name: &str, method: u16, zip64: bool, mtime: SystemTime) -> Self {
+        let (time, date) = system_time_to_ms_dos(mtime);
         let mut flags = FLAG_DATA_DESC;
         if !name.is_ascii() {
             flags |= 1 << 11; // EFS / Language encoding flag (bit 11)
         }
+        let unix_secs = mtime
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         Self {
             version_needed: if zip64 {
                 VERSION_ZIP64
@@ -251,11 +236,11 @@ impl LocalFileHeader {
             date,
             name: name.as_bytes().to_vec(),
             extra: {
-                let mut extra = if !name.is_ascii() {
-                    build_unicode_extra_field(name)
-                } else {
-                    Vec::new()
-                };
+                let mut extra = Vec::new();
+                extra.extend(build_extended_timestamp_extra(unix_secs));
+                if !name.is_ascii() {
+                    extra.extend(build_unicode_extra_field(name));
+                }
                 if zip64 {
                     extra.extend(build_zip64_extra_lfh());
                 }
@@ -365,8 +350,8 @@ pub(crate) struct CentralDirEntry {
     /// External file attributes, host-OS dependent.
     /// For Unix (version_made_by upper byte = 3), upper 16 bits hold st_mode.
     pub(crate) external_file_attributes: u32,
-    /// Internal file attributes (bit 0 = text file).
-    pub(crate) internal_file_attributes: u16,
+    /// File comment (optional, stored after extra field).
+    pub(crate) comment: Option<Vec<u8>>,
 }
 
 impl CentralDirEntry {
@@ -402,8 +387,16 @@ impl CentralDirEntry {
                 max: u16::MAX as usize,
             });
         }
+        let comment = self.comment.as_deref().unwrap_or_default();
+        if comment.len() > u16::MAX as usize {
+            return Err(ZipError::FieldTooLong {
+                field: "CentralDirEntry comment",
+                len: comment.len(),
+                max: u16::MAX as usize,
+            });
+        }
 
-        let mut buf = Vec::with_capacity(46 + self.name.len() + extra.len());
+        let mut buf = Vec::with_capacity(46 + self.name.len() + extra.len() + comment.len());
         put_u32(&mut buf, CD_SIG);
         put_u16(&mut buf, self.version_made_by);
         put_u16(
@@ -437,9 +430,9 @@ impl CentralDirEntry {
         );
         put_u16(&mut buf, self.name.len() as u16);
         put_u16(&mut buf, extra.len() as u16);
-        put_u16(&mut buf, 0); // file comment length
+        put_u16(&mut buf, comment.len() as u16);
         put_u16(&mut buf, 0); // disk number start
-        put_u16(&mut buf, self.internal_file_attributes);
+        put_u16(&mut buf, 0); // internal file attributes
         put_u32(&mut buf, self.external_file_attributes);
         put_u32(
             &mut buf,
@@ -451,6 +444,7 @@ impl CentralDirEntry {
         );
         buf.extend_from_slice(&self.name);
         buf.extend_from_slice(&extra);
+        buf.extend_from_slice(comment);
         Ok(buf)
     }
 
@@ -580,10 +574,10 @@ mod tests {
 
     #[test]
     fn test_local_file_header_size() {
-        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false);
+        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false, SystemTime::UNIX_EPOCH);
         let data = lfh.serialize().unwrap();
-        // LFH: 30 + filename(8) + no extra = 38
-        assert_eq!(data.len(), 38);
+        // LFH: 30 + filename(8) + extra(9) = 47
+        assert_eq!(data.len(), 47);
         assert_eq!(&data[0..4], &0x04034b50u32.to_le_bytes());
         assert_eq!(&data[8..10], &METHOD_DEFLATE.to_le_bytes());
         assert!(data[6] & (1 << 3) != 0);
@@ -593,14 +587,17 @@ mod tests {
             "expected VERSION_DEFLATE"
         );
         let extra_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
-        assert_eq!(extra_len, 0, "expected no extra field, got {extra_len}");
+        assert_eq!(
+            extra_len, 9,
+            "expected 9-byte extended timestamp extra, got {extra_len}"
+        );
     }
 
     #[test]
     fn test_local_file_header_zip64() {
         // When zip64=true, version_needed should be 45 and extra should contain
         // the ZIP64 extra ID (0x0001) to signal ZIP64 capability.
-        let lfh = LocalFileHeader::new("bigfile.bin", METHOD_DEFLATE, true);
+        let lfh = LocalFileHeader::new("bigfile.bin", METHOD_DEFLATE, true, SystemTime::UNIX_EPOCH);
         let data = lfh.serialize().unwrap();
         // version_needed at offset 4
         assert_eq!(
@@ -608,20 +605,30 @@ mod tests {
             VERSION_ZIP64,
             "expected VERSION_ZIP64 (45) for ZIP64 LFH"
         );
-        // extra field should contain ZIP64 (4 bytes)
+        // extra field should contain extended timestamp (9) + ZIP64 (4) = 13 bytes
         let name_len = u16::from_le_bytes(data[26..28].try_into().unwrap()) as usize;
         let extra_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
-        assert_eq!(extra_len, 4, "expected 4-byte ZIP64 extra, got {extra_len}");
+        assert_eq!(
+            extra_len, 13,
+            "expected 13-byte extra (9 timestamp + 4 zip64), got {extra_len}"
+        );
         let extra_start = 30 + name_len;
         let extra = &data[extra_start..extra_start + extra_len];
-        // Should contain ZIP64 extra ID 0x0001
+        // First extra: extended timestamp (0x5455), 9 bytes
         assert_eq!(
             u16::from_le_bytes(extra[0..2].try_into().unwrap()),
+            0x5455,
+            "expected extended timestamp extra ID (0x5455) first"
+        );
+        // Second extra: ZIP64 extra ID 0x0001 at offset 9
+        assert_eq!(
+            u16::from_le_bytes(extra[9..11].try_into().unwrap()),
             0x0001,
             "expected ZIP64 extra ID (0x0001)"
         );
         // Also test with stored method + zip64 to confirm VERSION_ZIP64 takes priority
-        let lfh_stored = LocalFileHeader::new("bigdir", METHOD_STORED, true);
+        let lfh_stored =
+            LocalFileHeader::new("bigdir", METHOD_STORED, true, SystemTime::UNIX_EPOCH);
         let data2 = lfh_stored.serialize().unwrap();
         assert_eq!(
             u16::from_le_bytes(data2[4..6].try_into().unwrap()),
@@ -662,7 +669,7 @@ mod tests {
             extra: Vec::new(),
             local_header_offset: 0,
             external_file_attributes: 0,
-            internal_file_attributes: 0,
+            comment: None,
         };
         let data = cde.serialize().unwrap();
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());
@@ -687,7 +694,7 @@ mod tests {
             extra: Vec::new(),
             local_header_offset: 0,
             external_file_attributes: 0,
-            internal_file_attributes: 0,
+            comment: None,
         };
         let data = cde.serialize().unwrap();
 
@@ -834,7 +841,7 @@ mod tests {
             extra: timestamp_extra.clone(),
             local_header_offset: 0,
             external_file_attributes: 0,
-            internal_file_attributes: 0,
+            comment: None,
         };
         let data = cde.serialize().unwrap();
 
@@ -872,7 +879,7 @@ mod tests {
     fn test_local_file_header_name_too_long() {
         // Filename exceeding u16::MAX should return an error, not silently truncate
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false, SystemTime::UNIX_EPOCH);
         let result = lfh.serialize();
         assert!(result.is_err(), "expected Err for oversized filename");
         let err = result.unwrap_err();
@@ -899,7 +906,7 @@ mod tests {
             extra: Vec::new(),
             local_header_offset: 0,
             external_file_attributes: 0,
-            internal_file_attributes: 0,
+            comment: None,
         };
         let result = cde.serialize();
         assert!(result.is_err(), "expected Err for oversized filename");
@@ -911,8 +918,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ms_dos_datetime() {
-        let (time, date) = ms_dos_datetime();
+    fn test_system_time_to_ms_dos() {
+        let (time, date) = system_time_to_ms_dos(SystemTime::now());
         let hour = time >> 11;
         let min = (time >> 5) & 0x3F;
         assert!(hour <= 23);

@@ -5,24 +5,23 @@
 //! incrementally — each file is compressed and written to the output as it
 //! arrives, without buffering the entire archive in memory.
 //!
-//! # Architecture
+//! # Public API
 //!
-//! The crate is organized into three modules:
-//!
-//! - [`ZipWriter`] — Streaming [`ZipWriter`] and per-entry [`EntryWriter`]
-//! - [`Compression`] — Deflate compression level (0-9) (re-exported from `flate2`)
+//! The main entry point is [`ZipWriter`], which accepts per-entry metadata
+//! via [`WriterOptions`]. Individual file data is streamed through
+//! [`EntryWriter`], obtained from [`ZipWriter::append_file`].
 //!
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use async_deflate_zip::ZipWriter;
+//! use async_deflate_zip::{ZipWriter, WriterOptions};
 //! use tokio::io::AsyncWriteExt;
 //!
 //! # async fn example() {
 //! let mut buf = Vec::new();
 //! let mut zip = ZipWriter::new(&mut buf);
 //!
-//! let mut entry = zip.append_file("hello.txt").await.unwrap();
+//! let mut entry = zip.append_file("hello.txt", WriterOptions::file()).await.unwrap();
 //! entry.write_all(b"Hello, World!").await.unwrap();
 //! entry.close().await.unwrap();
 //!
@@ -37,6 +36,6 @@ mod writer;
 
 pub use error::ZipError;
 pub use flate2::Compression;
-pub use writer::DirectoryWriter;
 pub use writer::EntryWriter;
+pub use writer::WriterOptions;
 pub use writer::ZipWriter;

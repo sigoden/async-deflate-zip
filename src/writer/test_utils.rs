@@ -123,13 +123,11 @@ pub(crate) fn lookup_entry(buf: &[u8], index: usize) -> StoredEntry {
     // Parse UID/GID from 0x7875 extra field
     let uid_gid = parse_ux_extra(extra);
 
-    // Parse internal file attributes (bit 0 = text file)
-    let internal_file_attributes = u16::from_le_bytes(cd[36..38].try_into().unwrap());
-
-    // mtime is reconstructed only if we have enough info — keep as None
+    // mtime is reconstructed only if we have enough info — use (0, 0)
     // for now since we don't parse MS-DOS time from the CD header fields
     // back into a SystemTime.
-    let mtime = None;
+    let mtime = (0, 0);
+    let unix_mtime = unix_mtime.unwrap_or(0);
 
     StoredEntry {
         name,
@@ -144,6 +142,6 @@ pub(crate) fn lookup_entry(buf: &[u8], index: usize) -> StoredEntry {
         unix_mtime,
         unix_permissions,
         uid_gid,
-        internal_file_attributes,
+        comment: None,
     }
 }

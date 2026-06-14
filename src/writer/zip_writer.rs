@@ -1,14 +1,15 @@
+use super::entry_writer::EntryWriter;
+use super::helpers::CountWriter;
+use super::stored_entry::StoredEntry;
+use super::writer_options::WriterOptions;
+
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
 use crate::header;
 
 use flate2::Compression;
+use std::borrow::Cow;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-
-use super::directory_writer::DirectoryWriter;
-use super::entry_writer::EntryWriter;
-use super::helpers::CountWriter;
-use super::stored_entry::StoredEntry;
 
 /// A streaming ZIP archive writer with per-file deflate compression.
 ///
@@ -20,14 +21,14 @@ use super::stored_entry::StoredEntry;
 /// # Example
 ///
 /// ```rust,no_run
-/// use async_deflate_zip::ZipWriter;
+/// use async_deflate_zip::{ZipWriter, WriterOptions};
 /// use tokio::io::AsyncWriteExt;
 ///
 /// # async fn example() {
 /// let mut buf = Vec::new();
 /// let mut zip = ZipWriter::new(&mut buf);
 ///
-/// let mut entry = zip.append_file("hello.txt").await.unwrap();
+/// let mut entry = zip.append_file("hello.txt", WriterOptions::file()).await.unwrap();
 /// entry.write_all(b"Hello, World!").await.unwrap();
 /// entry.close().await.unwrap();
 ///
@@ -89,19 +90,23 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::ZipWriter;
+    /// use async_deflate_zip::{ZipWriter, WriterOptions};
     /// use tokio::io::AsyncWriteExt;
     ///
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// let mut entry = zip.append_file("readme.txt").await.unwrap();
+    /// let mut entry = zip.append_file("readme.txt", WriterOptions::file()).await.unwrap();
     /// entry.write_all(b"content").await.unwrap();
     /// entry.close().await.unwrap();
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
-    pub async fn append_file<'a>(&'a mut self, name: &str) -> Result<EntryWriter<'a, W>, ZipError> {
+    pub async fn append_file<'a>(
+        &'a mut self,
+        name: &str,
+        options: WriterOptions,
+    ) -> Result<EntryWriter<'a, W>, ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
                 ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
@@ -109,6 +114,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
                 ZipError::InvalidState("entry writer already active".to_string())
             }
         })?;
+
+        let name = sanitize_path(name, false);
 
         let is_stored = self.level.level() == 0;
         let method = if is_stored {
@@ -118,7 +125,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         };
 
         let needs_zip64 = self.pos > header::U32_MAX;
-        let lfh = header::LocalFileHeader::new(name, method, needs_zip64);
+        let lfh = header::LocalFileHeader::new(&name, method, needs_zip64, options.mtime);
         let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
@@ -145,41 +152,39 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             uncompressed_size: 0,
             local_header_offset: offset,
             name: name.to_string(),
-            mtime: None,
-            unix_permissions: None,
-            uid_gid: None,
-            internal_file_attributes: 0,
+            mtime: options.mtime,
+            unix_permissions: options.permissions,
+            uid_gid: options.uid_gid,
+            comment: options.comment.map(|s| s.into_bytes()),
         })
     }
 
     /// Start a new directory entry.
     ///
-    /// Writes the Local File Header and returns a [`DirectoryWriter`] handle.
-    /// Call [`close`](DirectoryWriter::close) to finalize the entry.
-    /// Directory names should end with `'/'`.
+    /// Writes the Local File Header and Data Descriptor, then registers
+    /// the entry in the archive. Directory names should end with `'/'`.
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if writer is poisoned, or if writing the
-    /// Local File Header fails (I/O error or field too long).
+    /// Returns [`ZipError`] if writer is poisoned, or if writing fails.
     ///
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::ZipWriter;
+    /// use async_deflate_zip::{ZipWriter, WriterOptions};
     ///
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// let mut dir = zip.append_directory("mydir/").await.unwrap();
-    /// dir.close().await.unwrap();
+    /// zip.append_directory("mydir/", WriterOptions::directory()).await.unwrap();
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
-    pub async fn append_directory<'a>(
-        &'a mut self,
+    pub async fn append_directory(
+        &mut self,
         name: &str,
-    ) -> Result<DirectoryWriter<'a, W>, ZipError> {
+        options: WriterOptions,
+    ) -> Result<(), ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
                 ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
@@ -187,22 +192,50 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
                 ZipError::InvalidState("entry writer already active".to_string())
             }
         })?;
+
+        let name = sanitize_path(name, true);
+
         let needs_zip64 = self.pos > header::U32_MAX;
-        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED, needs_zip64);
+        let lfh =
+            header::LocalFileHeader::new(&name, header::METHOD_STORED, needs_zip64, options.mtime);
         let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
         self.pos += lfh_bytes.len() as u64;
 
-        Ok(DirectoryWriter {
-            zip: self,
-            writer: Some(inner),
+        let dd = header::DataDescriptor {
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            zip64: offset > header::U32_MAX,
+        };
+        let dd_bytes = dd.serialize();
+        inner.write_all(&dd_bytes).await.map_err(|e| {
+            self.poisoned = true;
+            ZipError::Io(e)
+        })?;
+        self.pos += dd_bytes.len() as u64;
+
+        let (mtime_msdos, unix_mtime) = header::mtime_to_ms_dos_and_unix(options.mtime);
+
+        self.entries.push(StoredEntry {
             name: name.to_string(),
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
             local_header_offset: offset,
-            mtime: None,
-            unix_permissions: None,
-            uid_gid: None,
-        })
+            is_directory: true,
+            is_symlink: false,
+            is_stored: true,
+            mtime: mtime_msdos,
+            unix_mtime,
+            unix_permissions: options.permissions,
+            uid_gid: options.uid_gid,
+            comment: options.comment.map(|s| s.into_bytes()),
+        });
+
+        self.inner = Some(inner);
+        Ok(())
     }
 
     /// Add a symbolic link entry.
@@ -222,16 +255,23 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::ZipWriter;
+    /// use async_deflate_zip::{ZipWriter, WriterOptions};
     ///
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// zip.append_symlink("link.txt", "target.txt").await.unwrap();
+    /// zip.append_symlink("link.txt", "target.txt", WriterOptions::symlink()).await.unwrap();
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
-    pub async fn append_symlink(&mut self, name: &str, target: &str) -> Result<(), ZipError> {
+    pub async fn append_symlink(
+        &mut self,
+        path: &str,
+        target: &str,
+        options: WriterOptions,
+    ) -> Result<(), ZipError> {
+        let name = sanitize_path(path, false);
+        let target = sanitize_path(target, false);
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
                 ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
@@ -240,7 +280,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             }
         })?;
         let needs_zip64 = self.pos > header::U32_MAX;
-        let lfh = header::LocalFileHeader::new(name, header::METHOD_STORED, needs_zip64);
+        let lfh =
+            header::LocalFileHeader::new(&name, header::METHOD_STORED, needs_zip64, options.mtime);
         let lfh_bytes = lfh.serialize()?;
         inner.write_all(&lfh_bytes).await?;
         let offset = self.pos;
@@ -270,6 +311,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         })?;
         self.pos += dd_bytes.len() as u64;
 
+        let (mtime_msdos, unix_mtime) = header::mtime_to_ms_dos_and_unix(options.mtime);
+
         self.entries.push(StoredEntry {
             name: name.to_string(),
             crc32,
@@ -278,12 +321,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             local_header_offset: offset,
             is_directory: false,
             is_symlink: true,
-            is_stored: false,
-            mtime: None,
-            unix_mtime: None,
-            unix_permissions: None,
-            uid_gid: None,
-            internal_file_attributes: 0,
+            is_stored: true,
+            mtime: mtime_msdos,
+            unix_mtime,
+            unix_permissions: options.permissions,
+            uid_gid: options.uid_gid,
+            comment: options.comment.map(|s| s.into_bytes()),
         });
         self.inner = Some(inner);
         Ok(())
@@ -352,6 +395,19 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     }
 }
 
+fn sanitize_path(name: &str, is_directory: bool) -> Cow<'_, str> {
+    let sanitized = if name.contains('\\') {
+        Cow::Owned(name.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(name)
+    };
+    if is_directory && !sanitized.ends_with('/') {
+        Cow::Owned(format!("{sanitized}/"))
+    } else {
+        sanitized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,7 +419,10 @@ mod tests {
     async fn test_zip_write_single_file() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
-        let mut entry = zip.append_file("hello.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("hello.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry.write_all(b"Hello, World!").await.unwrap();
         entry.close().await.unwrap();
         zip.finalize().await.unwrap();
@@ -379,11 +438,17 @@ mod tests {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
 
-        let mut entry = zip.append_file("a.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("a.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry.write_all(b"aaa").await.unwrap();
         entry.close().await.unwrap();
 
-        let mut entry = zip.append_file("b.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("b.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry.write_all(b"bbb").await.unwrap();
         entry.close().await.unwrap();
 
@@ -398,7 +463,10 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf).with_level(Compression::best());
 
         let data = vec![b'A'; 1024];
-        let mut entry = zip.append_file("repeated.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("repeated.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry.write_all(&data).await.unwrap();
         entry.close().await.unwrap();
         zip.finalize().await.unwrap();
@@ -416,7 +484,9 @@ mod tests {
     async fn test_symlink_entry() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
-        zip.append_symlink("link.txt", "target.txt").await.unwrap();
+        zip.append_symlink("link.txt", "target.txt", WriterOptions::symlink())
+            .await
+            .unwrap();
         zip.finalize().await.unwrap();
 
         let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
@@ -455,7 +525,7 @@ mod tests {
 
         for i in 0..=num_entries {
             let name = format!("f{i}");
-            let mut entry = zip.append_file(&name).await.unwrap();
+            let mut entry = zip.append_file(&name, WriterOptions::file()).await.unwrap();
             entry.write_all(b"x").await.unwrap();
             entry.close().await.unwrap();
         }
@@ -484,16 +554,16 @@ mod tests {
         let cd_count = buf.windows(4).filter(|w| w == b"PK\x01\x02").count();
         assert_eq!(cd_count, num_entries as usize + 1);
 
-        // LFH (30 + 2 name + 0 extra = 32) + 1 byte data + 16 DD = 49
+        // LFH (30 + 2 name + 9 extra = 41) + 1 byte data + 16 DD = 58
         assert_eq!(
-            &buf[33..37],
+            &buf[42..46],
             b"PK\x07\x08",
             "first entry should have DD signature"
         );
         assert_eq!(
-            &buf[49..53],
+            &buf[58..62],
             b"PK\x03\x04",
-            "next LFH at offset 49 confirms 16-byte DD (non-ZIP64) for small-entry ZIP64 archive"
+            "next LFH at offset 58 confirms 16-byte DD (non-ZIP64) for small-entry ZIP64 archive"
         );
     }
 
@@ -503,7 +573,10 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf).with_level(Compression::none());
 
         let data = b"Hello, stored entry!";
-        let mut entry = zip.append_file("stored.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("stored.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry.write_all(data).await.unwrap();
         entry.close().await.unwrap();
         zip.finalize().await.unwrap();
@@ -529,5 +602,109 @@ mod tests {
         let lfh_pos = buf.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
         let lfh_method = u16::from_le_bytes(buf[lfh_pos + 8..lfh_pos + 10].try_into().unwrap());
         assert_eq!(lfh_method, 0, "LFH method should be STORED for level=0");
+    }
+
+    #[tokio::test]
+    async fn test_directory_entry() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        zip.append_directory("mydir/", WriterOptions::directory())
+            .await
+            .unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+
+        let version_needed = u16::from_le_bytes(cd[6..8].try_into().unwrap());
+        assert_eq!(version_needed, 10, "expected VERSION_STORED for directory");
+
+        let method = u16::from_le_bytes(cd[10..12].try_into().unwrap());
+        assert_eq!(method, 0, "expected METHOD_STORED for directory");
+
+        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
+        assert!(
+            (efa >> 16) & 0o170000 == 0o040000,
+            "expected S_IFDIR in external_file_attributes, got {:06o}",
+            efa >> 16
+        );
+        assert_eq!(
+            (efa >> 16) & 0o7777,
+            0o755,
+            "expected directory permissions 0o755, got {:06o}",
+            (efa >> 16) & 0o7777
+        );
+
+        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
+        let extra_start = 46 + name_len;
+        let extra = &cd[extra_start..extra_start + extra_len];
+        assert!(
+            extra.windows(2).any(|w| w == b"UT"),
+            "CD extra should contain UT (0x5455) tag for directory with mtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_entry_comment() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip
+            .append_file(
+                "commented.txt",
+                WriterOptions {
+                    mtime: std::time::SystemTime::now(),
+                    permissions: None,
+                    uid_gid: None,
+                    comment: Some("file comment".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        entry.write_all(b"data").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+
+        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
+        let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
+        assert_eq!(comment_len, 12, "expected 12-byte comment");
+
+        let comment_start = 46 + name_len + extra_len;
+        let comment = &cd[comment_start..comment_start + comment_len];
+        assert_eq!(comment, b"file comment");
+    }
+
+    #[tokio::test]
+    async fn test_directory_entry_comment() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        zip.append_directory(
+            "dir/",
+            WriterOptions {
+                mtime: std::time::SystemTime::now(),
+                permissions: Some(0o755),
+                uid_gid: None,
+                comment: Some("dir comment".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        zip.finalize().await.unwrap();
+
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+
+        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
+        let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
+        assert_eq!(comment_len, 11, "expected 11-byte comment");
+
+        let comment_start = 46 + name_len + extra_len;
+        let comment = &cd[comment_start..comment_start + comment_len];
+        assert_eq!(comment, b"dir comment");
     }
 }

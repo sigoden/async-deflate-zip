@@ -14,7 +14,7 @@ keywords = ["async", "zip", "archive", "tokio"]
 repository = "https://github.com/sigoden/async-deflate-zip"
 
 [dependencies]
-tokio = { version = "1", features = ["io-util", "rt"] }
+tokio = { version = "1", features = ["fs", "io-util", "rt"] }
 time = { version = "0.3", features = ["local-offset"] }
 crc32fast = "1"
 pin-project-lite = "0.2"

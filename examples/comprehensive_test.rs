@@ -2,8 +2,8 @@
 //!
 //! Tests all public APIs:
 //! - ZipWriter::new / ZipWriter::with_level
-//! - ZipWriter::append_file → EntryWriter (write, set_mtime, set_permissions, close)
-//! - ZipWriter::append_directory → DirectoryWriter (set_mtime, set_permissions, close)
+//! - ZipWriter::append_file → EntryWriter (write, close)
+//! - ZipWriter::append_directory
 //! - ZipWriter::append_symlink
 //! - ZipWriter::finalize
 //!
@@ -12,7 +12,7 @@
 //! Every test writes the archive directly to a temp file and validates it
 //! with system `unzip -t` / `zipinfo` tools — no in-memory buffer.
 
-use async_deflate_zip::{Compression, ZipWriter};
+use async_deflate_zip::{Compression, WriterOptions, ZipWriter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tokio::io::AsyncWriteExt;
@@ -26,7 +26,10 @@ async fn test_basic_single_file() {
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
-    let mut entry = zip.append_file("hello.txt").await.unwrap();
+    let mut entry = zip
+        .append_file("hello.txt", WriterOptions::file())
+        .await
+        .unwrap();
     entry.write_all(b"Hello, async-deflate-zip!").await.unwrap();
     entry.close().await.unwrap();
     zip.finalize().await.unwrap();
@@ -53,7 +56,10 @@ async fn test_compression_levels() {
         let path = zip_out_path(&format!("test_compression_levels_{label}"));
         let file = tokio::fs::File::create(&path).await.unwrap();
         let mut zip = ZipWriter::new(file).with_level(*level);
-        let mut entry = zip.append_file(&format!("data_{label}.bin")).await.unwrap();
+        let mut entry = zip
+            .append_file(&format!("data_{label}.bin"), WriterOptions::file())
+            .await
+            .unwrap();
         entry.write_all(&data).await.unwrap();
         entry.close().await.unwrap();
         zip.finalize().await.unwrap();
@@ -87,7 +93,7 @@ async fn test_multiple_files_nested() {
     ];
 
     for (name, content) in &files {
-        let mut entry = zip.append_file(name).await.unwrap();
+        let mut entry = zip.append_file(name, WriterOptions::file()).await.unwrap();
         entry.write_all(content).await.unwrap();
         entry.close().await.unwrap();
     }
@@ -105,28 +111,63 @@ async fn test_directory_entries() {
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
-    // Simple directory
-    let dir = zip.append_directory("emptydir/").await.unwrap();
-    dir.close().await.unwrap();
+    // Simple directory (virtual, not backed by a real filesystem path)
+    zip.append_directory(
+        "emptydir/",
+        WriterOptions {
+            mtime: std::time::SystemTime::now(),
+            permissions: None,
+            uid_gid: None,
+            comment: None,
+        },
+    )
+    .await
+    .unwrap();
 
     // Directory with mtime
-    let mut dir = zip.append_directory("dated_dir/").await.unwrap();
-    dir.set_mtime(std::time::SystemTime::UNIX_EPOCH);
-    dir.close().await.unwrap();
+    zip.append_directory(
+        "dated_dir/",
+        WriterOptions {
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            permissions: None,
+            uid_gid: None,
+            comment: None,
+        },
+    )
+    .await
+    .unwrap();
 
     // Directory with permissions
-    let mut dir = zip.append_directory("protected_dir/").await.unwrap();
-    dir.set_permissions(0o755);
-    dir.close().await.unwrap();
+    zip.append_directory(
+        "protected_dir/",
+        WriterOptions {
+            mtime: std::time::SystemTime::now(),
+            permissions: Some(0o755),
+            uid_gid: None,
+            comment: None,
+        },
+    )
+    .await
+    .unwrap();
 
     // Directory with both
-    let mut dir = zip.append_directory("full_meta_dir/").await.unwrap();
-    dir.set_mtime(std::time::SystemTime::now());
-    dir.set_permissions(0o700);
-    dir.close().await.unwrap();
+    zip.append_directory(
+        "full_meta_dir/",
+        WriterOptions {
+            mtime: std::time::SystemTime::now(),
+            permissions: Some(0o700),
+            uid_gid: None,
+            comment: None,
+        },
+    )
+    .await
+    .unwrap();
 
     // File inside a directory (demonstrates the directory/file relationship)
-    let mut entry = zip.append_file("emptydir/hello.txt").await.unwrap();
+    let mut entry = zip
+        .append_file("emptydir/hello.txt", WriterOptions::file())
+        .await
+        .unwrap();
     entry.write_all(b"nested").await.unwrap();
     entry.close().await.unwrap();
 
@@ -144,8 +185,10 @@ async fn test_symlink_entries() {
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
-    zip.append_symlink("link.txt", "hello.txt").await.unwrap();
-    zip.append_symlink("sub/alink", "../link.txt")
+    zip.append_symlink("link.txt", "hello.txt", WriterOptions::symlink())
+        .await
+        .unwrap();
+    zip.append_symlink("sub/alink", "../link.txt", WriterOptions::symlink())
         .await
         .unwrap();
 
@@ -164,33 +207,72 @@ async fn test_entry_metadata() {
 
     // File with mtime only
     {
-        let mut entry = zip.append_file("mtime_only.txt").await.unwrap();
-        entry.set_mtime(std::time::SystemTime::UNIX_EPOCH);
+        let mut entry = zip
+            .append_file(
+                "mtime_only.txt",
+                WriterOptions {
+                    mtime: std::time::SystemTime::UNIX_EPOCH,
+                    permissions: None,
+                    uid_gid: None,
+                    comment: None,
+                },
+            )
+            .await
+            .unwrap();
         entry.write_all(b"epoch").await.unwrap();
         entry.close().await.unwrap();
     }
 
     // File with permissions only
     {
-        let mut entry = zip.append_file("perm_only.txt").await.unwrap();
-        entry.set_permissions(0o644);
+        let mut entry = zip
+            .append_file(
+                "perm_only.txt",
+                WriterOptions {
+                    mtime: std::time::SystemTime::now(),
+                    permissions: Some(0o644),
+                    uid_gid: None,
+                    comment: None,
+                },
+            )
+            .await
+            .unwrap();
         entry.write_all(b"readable").await.unwrap();
         entry.close().await.unwrap();
     }
 
     // File with both
     {
-        let mut entry = zip.append_file("both_meta.txt").await.unwrap();
-        entry.set_mtime(std::time::SystemTime::now());
-        entry.set_permissions(0o755);
+        let mut entry = zip
+            .append_file(
+                "both_meta.txt",
+                WriterOptions {
+                    mtime: std::time::SystemTime::now(),
+                    permissions: Some(0o755),
+                    uid_gid: None,
+                    comment: None,
+                },
+            )
+            .await
+            .unwrap();
         entry.write_all(b"executable").await.unwrap();
         entry.close().await.unwrap();
     }
 
     // File with setuid
     {
-        let mut entry = zip.append_file("setuid.txt").await.unwrap();
-        entry.set_permissions(0o4755);
+        let mut entry = zip
+            .append_file(
+                "setuid.txt",
+                WriterOptions {
+                    mtime: std::time::SystemTime::now(),
+                    permissions: Some(0o4755),
+                    uid_gid: None,
+                    comment: None,
+                },
+            )
+            .await
+            .unwrap();
         entry.write_all(b"setuid").await.unwrap();
         entry.close().await.unwrap();
     }
@@ -231,8 +313,9 @@ async fn test_from_filesystem() {
         let fpath = entry.path();
         if fpath.is_file() {
             let name = fpath.file_name().unwrap().to_str().unwrap().to_string();
+            let options = WriterOptions::from_path(&fpath).await.unwrap();
             let content = tokio::fs::read(&fpath).await.unwrap();
-            let mut zw = zip.append_file(&name).await.unwrap();
+            let mut zw = zip.append_file(&name, options).await.unwrap();
             zw.write_all(&content).await.unwrap();
             zw.close().await.unwrap();
             println!("  added: {} ({} bytes)", name, content.len());
@@ -253,11 +336,17 @@ async fn test_stored_entry() {
     let file = tokio::fs::File::create(&path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_level(Compression::none());
 
-    let mut entry = zip.append_file("stored.bin").await.unwrap();
+    let mut entry = zip
+        .append_file("stored.bin", WriterOptions::file())
+        .await
+        .unwrap();
     entry.write_all(&[0xFF; 500]).await.unwrap();
     entry.close().await.unwrap();
 
-    let mut entry = zip.append_file("stored2.bin").await.unwrap();
+    let mut entry = zip
+        .append_file("stored2.bin", WriterOptions::file())
+        .await
+        .unwrap();
     entry.write_all(b"small stored data").await.unwrap();
     entry.close().await.unwrap();
 
@@ -276,7 +365,10 @@ async fn test_unicode_entries() {
 
     // German filename with German text content
     {
-        let mut entry = zip.append_file("Grüß Gott.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("Grüß Gott.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry
             .write_all("Schöne Grüße aus der UTF-8-Welt!".as_bytes())
             .await
@@ -287,7 +379,10 @@ async fn test_unicode_entries() {
 
     // Chinese filename with Chinese text content
     {
-        let mut entry = zip.append_file("世界.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("世界.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry
             .write_all("你好，世界！来自异步压缩库的问候。".as_bytes())
             .await
@@ -298,8 +393,17 @@ async fn test_unicode_entries() {
 
     // Directory with Chinese name
     {
-        let dir = zip.append_directory("목차/").await.unwrap();
-        dir.close().await.unwrap();
+        zip.append_directory(
+            "목차/",
+            WriterOptions {
+                mtime: std::time::SystemTime::now(),
+                permissions: None,
+                uid_gid: None,
+                comment: None,
+            },
+        )
+        .await
+        .unwrap();
         println!("  added: 목차/");
     }
 
@@ -319,7 +423,7 @@ async fn test_zip64_many_entries() {
     let count = 0xFFFF + 1; // 65536 entries — exceeds the 16-bit limit
     for i in 0..count {
         let name = format!("files/f{i}");
-        let mut entry = zip.append_file(&name).await.unwrap();
+        let mut entry = zip.append_file(&name, WriterOptions::file()).await.unwrap();
         entry.write_all(b"x").await.unwrap();
         entry.close().await.unwrap();
     }
@@ -328,6 +432,64 @@ async fn test_zip64_many_entries() {
 
     // Verify entry count via zipinfo/unzip or self-contained parser
     verify_zip_structure(&path, count).await;
+}
+
+// ============================================================
+// Entry comments
+// ============================================================
+async fn test_entry_comments() {
+    println!("--- Entry comments ---");
+    let path = zip_out_path("test_entry_comments");
+    let file = tokio::fs::File::create(&path).await.unwrap();
+    let mut zip = ZipWriter::new(file);
+
+    // File entry with comment
+    {
+        let mut entry = zip
+            .append_file(
+                "hello.txt",
+                WriterOptions {
+                    mtime: std::time::SystemTime::now(),
+                    permissions: None,
+                    uid_gid: None,
+                    comment: Some("a short file comment".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        entry.write_all(b"Hello!").await.unwrap();
+        entry.close().await.unwrap();
+    }
+
+    // Directory entry with comment
+    zip.append_directory(
+        "mydir/",
+        WriterOptions {
+            mtime: std::time::SystemTime::now(),
+            permissions: Some(0o755),
+            uid_gid: None,
+            comment: Some("directory comment".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Symlink entry with comment
+    zip.append_symlink(
+        "link.txt",
+        "hello.txt",
+        WriterOptions {
+            mtime: std::time::SystemTime::now(),
+            permissions: Some(0o777),
+            uid_gid: None,
+            comment: Some("symlink comment".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    zip.finalize().await.unwrap();
+    verify_zip_structure(&path, 3).await;
 }
 
 // ============================================================
@@ -380,7 +542,7 @@ async fn test_large_file_zip64() {
     // Add the large file with a descriptive name
     {
         let mut entry = zip
-            .append_file("large_data_4GB.bin")
+            .append_file("large_data_4GB.bin", WriterOptions::file())
             .await
             .expect("append_file for large entry");
         // Stream the large file in chunks to avoid reading 4.5 GiB into memory
@@ -400,7 +562,10 @@ async fn test_large_file_zip64() {
 
     // Also add a small file to verify the archive is well-formed end-to-end
     {
-        let mut entry = zip.append_file("readme.txt").await.unwrap();
+        let mut entry = zip
+            .append_file("readme.txt", WriterOptions::file())
+            .await
+            .unwrap();
         entry
             .write_all(b"This archive contains a >4GB file.")
             .await
@@ -443,6 +608,7 @@ async fn main() {
     test_from_filesystem().await;
     test_stored_entry().await;
     test_unicode_entries().await;
+    test_entry_comments().await;
 
     // ZIP64 via many entries (memory-safe)
     test_zip64_many_entries().await;

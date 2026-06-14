@@ -435,13 +435,13 @@ async fn test_zip64_many_entries() {
 }
 
 // ============================================================
-// Entry comments
+// Entry comments + archive comment
 // ============================================================
-async fn test_entry_comments() {
-    println!("--- Entry comments ---");
-    let path = zip_out_path("test_entry_comments");
+async fn test_comments() {
+    println!("--- Entry comments + archive comment ---");
+    let path = zip_out_path("test_comments");
     let file = tokio::fs::File::create(&path).await.unwrap();
-    let mut zip = ZipWriter::new(file);
+    let mut zip = ZipWriter::new(file).with_comment("async-deflate-zip archive");
 
     // File entry with comment
     {
@@ -608,7 +608,7 @@ async fn main() {
     test_from_filesystem().await;
     test_stored_entry().await;
     test_unicode_entries().await;
-    test_entry_comments().await;
+    test_comments().await;
 
     // ZIP64 via many entries (memory-safe)
     test_zip64_many_entries().await;

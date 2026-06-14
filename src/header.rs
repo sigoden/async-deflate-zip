@@ -476,6 +476,8 @@ pub(crate) struct Eocdr {
     pub(crate) cd_size: u64,
     /// Offset of the central directory from the start of the archive.
     pub(crate) cd_offset: u64,
+    /// Archive-level comment (optional, max 65535 bytes).
+    pub(crate) comment: Option<Vec<u8>>,
 }
 
 impl Eocdr {
@@ -483,7 +485,9 @@ impl Eocdr {
         let use_zip64 =
             self.total_entries > 0xFFFF || self.cd_size > U32_MAX || self.cd_offset > U32_MAX;
 
-        let mut buf = Vec::with_capacity(22);
+        let comment = self.comment.as_deref().unwrap_or_default();
+
+        let mut buf = Vec::with_capacity(22 + comment.len());
         put_u32(&mut buf, EOCDR_SIG);
         put_u16(&mut buf, 0);
         put_u16(&mut buf, 0);
@@ -510,7 +514,8 @@ impl Eocdr {
                 self.cd_offset as u32
             },
         );
-        put_u16(&mut buf, 0);
+        put_u16(&mut buf, comment.len() as u16);
+        buf.extend_from_slice(comment);
         buf
     }
 }
@@ -767,6 +772,7 @@ mod tests {
             total_entries: 10,
             cd_size: 5000,
             cd_offset: 10000,
+            comment: None,
         };
         let data = eocdr.serialize();
         assert_eq!(&data[0..4], &0x06054b50u32.to_le_bytes());
@@ -783,6 +789,7 @@ mod tests {
             total_entries: 70000,
             cd_size: 5_000_000_000,
             cd_offset: 6_000_000_000,
+            comment: None,
         };
         let data = eocdr.serialize();
         assert_eq!(&data[8..10], &0xFFFFu16.to_le_bytes());

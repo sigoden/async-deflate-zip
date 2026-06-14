@@ -12,7 +12,7 @@
 //!   zip test.zip examples
 //!   zip test.zip Cargo.toml examples
 
-use async_deflate_zip::{Compression, WriterOptions, ZipWriter};
+use async_deflate_zip::{Compression, EntryOptions, ZipWriter};
 use std::env;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -53,17 +53,21 @@ async fn main() {
         }
     }
 
-    let output_path = match output_path {
+    let mut output_path = match output_path {
         Some(p) => p,
         None => {
-            let name = targets
-                .first()
-                .and_then(|p| p.file_name())
-                .map(|n| format!("{}.zip", n.to_string_lossy()))
-                .unwrap_or_else(|| "archive.zip".to_string());
-            PathBuf::from(name)
+            eprintln!("Error: output file not specified");
+            std::process::exit(1);
         }
     };
+    if targets.is_empty() && output_path.is_dir() {
+        targets.push(output_path.clone());
+        output_path = PathBuf::from(format!("{}.zip", output_path.display()));
+    }
+    if targets.is_empty() {
+        eprintln!("Error: no target paths specified");
+        std::process::exit(1);
+    }
 
     let file = fs::File::create(&output_path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_level(compression);
@@ -88,23 +92,23 @@ async fn add_targets<W: AsyncWriteExt + Unpin>(
     }
 
     for target in targets {
-        let options = WriterOptions::from_path(target).await?;
+        let entry_options = EntryOptions::from_path(target).await?;
         let target_name = target
             .file_name()
             .unwrap_or_else(|| target.as_os_str())
             .to_string_lossy()
             .into_owned();
         if target.is_dir() {
-            zip.append_directory(&target_name, options).await?;
+            zip.append_directory(&target_name, entry_options).await?;
             Box::pin(add_dir(zip, target, target, Some(&target_name))).await?;
         } else if target.is_file() {
-            let mut entry = zip.append_file(&target_name, options).await?;
+            let mut entry = zip.append_file(&target_name, entry_options).await?;
             let mut file = fs::File::open(target).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.close().await?;
         } else if target.is_symlink() {
             let link_target = fs::read_link(target).await?;
-            zip.append_symlink(&target_name, &link_target.to_string_lossy(), options)
+            zip.append_symlink(&target_name, &link_target.to_string_lossy(), entry_options)
                 .await?;
         }
     }
@@ -129,19 +133,20 @@ async fn add_dir<W: AsyncWriteExt + Unpin>(
         };
 
         let file_type = entry.file_type().await?;
-        let options = WriterOptions::from_path(&path).await?;
+        let entry_options = EntryOptions::from_path(&path).await?;
         if file_type.is_dir() {
-            zip.append_directory(&relative, options).await?;
+            zip.append_directory(&relative, entry_options).await?;
             Box::pin(add_dir(zip, base, &path, prefix)).await?;
         } else if file_type.is_file() {
-            let mut entry = zip.append_file(&relative, options).await?;
+            let mut entry = zip.append_file(&relative, entry_options).await?;
             let mut file = fs::File::open(&path).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.close().await?;
         } else if file_type.is_symlink() {
             let link_target = fs::read_link(&path).await?;
             let target_str = extract_relative_path(base, &link_target);
-            zip.append_symlink(&relative, &target_str, options).await?;
+            zip.append_symlink(&relative, &target_str, entry_options)
+                .await?;
         }
     }
 

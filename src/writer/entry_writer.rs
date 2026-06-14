@@ -239,8 +239,8 @@ mod tests {
     use std::time::SystemTime;
     use tokio::io::AsyncWriteExt;
 
-    fn opts_mtime(t: SystemTime) -> WriterOptions {
-        WriterOptions {
+    fn opts_mtime(t: SystemTime) -> EntryOptions {
+        EntryOptions {
             mtime: t,
             permissions: None,
             uid_gid: None,
@@ -248,8 +248,8 @@ mod tests {
         }
     }
 
-    fn opts_perms(mode: u32) -> WriterOptions {
-        WriterOptions {
+    fn opts_perms(mode: u32) -> EntryOptions {
+        EntryOptions {
             mtime: SystemTime::now(),
             permissions: Some(mode),
             uid_gid: None,
@@ -360,12 +360,12 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
 
         drop(
-            zip.append_file("lost.txt", WriterOptions::file())
+            zip.append_file("lost.txt", EntryOptions::file())
                 .await
                 .unwrap(),
         );
 
-        let result = zip.append_file("another.txt", WriterOptions::file()).await;
+        let result = zip.append_file("another.txt", EntryOptions::file()).await;
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.err().unwrap();
         assert!(
@@ -380,7 +380,7 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
 
         drop(
-            zip.append_file("lost.txt", WriterOptions::file())
+            zip.append_file("lost.txt", EntryOptions::file())
                 .await
                 .unwrap(),
         );

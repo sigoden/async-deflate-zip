@@ -1,7 +1,7 @@
+use super::entry_options::EntryOptions;
 use super::entry_writer::EntryWriter;
 use super::helpers::CountWriter;
 use super::stored_entry::StoredEntry;
-use super::writer_options::WriterOptions;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
@@ -21,14 +21,14 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 /// # Example
 ///
 /// ```rust,no_run
-/// use async_deflate_zip::{ZipWriter, WriterOptions};
+/// use async_deflate_zip::{ZipWriter, EntryOptions};
 /// use tokio::io::AsyncWriteExt;
 ///
 /// # async fn example() {
 /// let mut buf = Vec::new();
 /// let mut zip = ZipWriter::new(&mut buf);
 ///
-/// let mut entry = zip.append_file("hello.txt", WriterOptions::file()).await.unwrap();
+/// let mut entry = zip.append_file("hello.txt", EntryOptions::file()).await.unwrap();
 /// entry.write_all(b"Hello, World!").await.unwrap();
 /// entry.close().await.unwrap();
 ///
@@ -90,13 +90,13 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::{ZipWriter, WriterOptions};
+    /// use async_deflate_zip::{ZipWriter, EntryOptions};
     /// use tokio::io::AsyncWriteExt;
     ///
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// let mut entry = zip.append_file("readme.txt", WriterOptions::file()).await.unwrap();
+    /// let mut entry = zip.append_file("readme.txt", EntryOptions::file()).await.unwrap();
     /// entry.write_all(b"content").await.unwrap();
     /// entry.close().await.unwrap();
     /// zip.finalize().await.unwrap();
@@ -105,7 +105,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     pub async fn append_file<'a>(
         &'a mut self,
         name: &str,
-        options: WriterOptions,
+        options: EntryOptions,
     ) -> Result<EntryWriter<'a, W>, ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
@@ -171,19 +171,19 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::{ZipWriter, WriterOptions};
+    /// use async_deflate_zip::{ZipWriter, EntryOptions};
     ///
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// zip.append_directory("mydir/", WriterOptions::directory()).await.unwrap();
+    /// zip.append_directory("mydir/", EntryOptions::directory()).await.unwrap();
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
     pub async fn append_directory(
         &mut self,
         name: &str,
-        options: WriterOptions,
+        options: EntryOptions,
     ) -> Result<(), ZipError> {
         let mut inner = self.inner.take().ok_or_else(|| {
             if self.poisoned {
@@ -255,12 +255,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use async_deflate_zip::{ZipWriter, WriterOptions};
+    /// use async_deflate_zip::{ZipWriter, EntryOptions};
     ///
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// zip.append_symlink("link.txt", "target.txt", WriterOptions::symlink()).await.unwrap();
+    /// zip.append_symlink("link.txt", "target.txt", EntryOptions::symlink()).await.unwrap();
     /// zip.finalize().await.unwrap();
     /// # }
     /// ```
@@ -268,7 +268,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         &mut self,
         path: &str,
         target: &str,
-        options: WriterOptions,
+        options: EntryOptions,
     ) -> Result<(), ZipError> {
         let name = sanitize_path(path, false);
         let target = sanitize_path(target, false);
@@ -420,7 +420,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
-            .append_file("hello.txt", WriterOptions::file())
+            .append_file("hello.txt", EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(b"Hello, World!").await.unwrap();
@@ -439,14 +439,14 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
 
         let mut entry = zip
-            .append_file("a.txt", WriterOptions::file())
+            .append_file("a.txt", EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(b"aaa").await.unwrap();
         entry.close().await.unwrap();
 
         let mut entry = zip
-            .append_file("b.txt", WriterOptions::file())
+            .append_file("b.txt", EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(b"bbb").await.unwrap();
@@ -464,7 +464,7 @@ mod tests {
 
         let data = vec![b'A'; 1024];
         let mut entry = zip
-            .append_file("repeated.txt", WriterOptions::file())
+            .append_file("repeated.txt", EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(&data).await.unwrap();
@@ -484,7 +484,7 @@ mod tests {
     async fn test_symlink_entry() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
-        zip.append_symlink("link.txt", "target.txt", WriterOptions::symlink())
+        zip.append_symlink("link.txt", "target.txt", EntryOptions::symlink())
             .await
             .unwrap();
         zip.finalize().await.unwrap();
@@ -525,7 +525,7 @@ mod tests {
 
         for i in 0..=num_entries {
             let name = format!("f{i}");
-            let mut entry = zip.append_file(&name, WriterOptions::file()).await.unwrap();
+            let mut entry = zip.append_file(&name, EntryOptions::file()).await.unwrap();
             entry.write_all(b"x").await.unwrap();
             entry.close().await.unwrap();
         }
@@ -574,7 +574,7 @@ mod tests {
 
         let data = b"Hello, stored entry!";
         let mut entry = zip
-            .append_file("stored.txt", WriterOptions::file())
+            .append_file("stored.txt", EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(data).await.unwrap();
@@ -608,7 +608,7 @@ mod tests {
     async fn test_directory_entry() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
-        zip.append_directory("mydir/", WriterOptions::directory())
+        zip.append_directory("mydir/", EntryOptions::directory())
             .await
             .unwrap();
         zip.finalize().await.unwrap();
@@ -652,7 +652,7 @@ mod tests {
         let mut entry = zip
             .append_file(
                 "commented.txt",
-                WriterOptions {
+                EntryOptions {
                     mtime: std::time::SystemTime::now(),
                     permissions: None,
                     uid_gid: None,
@@ -684,7 +684,7 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
         zip.append_directory(
             "dir/",
-            WriterOptions {
+            EntryOptions {
                 mtime: std::time::SystemTime::now(),
                 permissions: Some(0o755),
                 uid_gid: None,

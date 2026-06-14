@@ -14,14 +14,14 @@ async-deflate-zip = "0.2.0"
 ```
 
 ```rust
-use async_deflate_zip::{ZipWriter, WriterOptions};
+use async_deflate_zip::{ZipWriter, EntryOptions};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 let file = File::create("tmp/output.zip").await?;
 let mut zip = ZipWriter::new(file);
 
-let mut entry = zip.append_file("hello.txt", WriterOptions::file()).await?;
+let mut entry = zip.append_file("hello.txt", EntryOptions::file()).await?;
 entry.write_all(b"Hello, World!").await?;
 entry.close().await?;
 

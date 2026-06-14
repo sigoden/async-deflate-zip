@@ -8,20 +8,20 @@
 //! # Public API
 //!
 //! The main entry point is [`ZipWriter`], which accepts per-entry metadata
-//! via [`WriterOptions`]. Individual file data is streamed through
+//! via [`EntryOptions`]. Individual file data is streamed through
 //! [`EntryWriter`], obtained from [`ZipWriter::append_file`].
 //!
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use async_deflate_zip::{ZipWriter, WriterOptions};
+//! use async_deflate_zip::{ZipWriter, EntryOptions};
 //! use tokio::io::AsyncWriteExt;
 //!
 //! # async fn example() {
 //! let mut buf = Vec::new();
 //! let mut zip = ZipWriter::new(&mut buf);
 //!
-//! let mut entry = zip.append_file("hello.txt", WriterOptions::file()).await.unwrap();
+//! let mut entry = zip.append_file("hello.txt", EntryOptions::file()).await.unwrap();
 //! entry.write_all(b"Hello, World!").await.unwrap();
 //! entry.close().await.unwrap();
 //!
@@ -36,6 +36,6 @@ mod writer;
 
 pub use error::ZipError;
 pub use flate2::Compression;
+pub use writer::EntryOptions;
 pub use writer::EntryWriter;
-pub use writer::WriterOptions;
 pub use writer::ZipWriter;

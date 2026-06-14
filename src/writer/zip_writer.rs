@@ -41,6 +41,7 @@ pub struct ZipWriter<W: AsyncWrite + Unpin> {
     level: Compression,
     pub(crate) pos: u64,
     pub(crate) poisoned: bool,
+    comment: Option<Vec<u8>>,
 }
 
 impl<W: AsyncWrite + Unpin> ZipWriter<W> {
@@ -55,6 +56,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             level: Compression::default(),
             pos: 0,
             poisoned: false,
+            comment: None,
         }
     }
 
@@ -73,6 +75,25 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// ```
     pub fn with_level(mut self, level: Compression) -> Self {
         self.level = level;
+        self
+    }
+
+    /// Set the archive-level comment.
+    ///
+    /// The comment is embedded in the End of Central Directory Record and can
+    /// be up to 65535 bytes when encoded as UTF-8. Returns `self` for chaining.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use async_deflate_zip::ZipWriter;
+    ///
+    /// let mut buf = Vec::new();
+    /// let zip = ZipWriter::new(&mut buf)
+    ///     .with_comment("Hello, archive!");
+    /// ```
+    pub fn with_comment(mut self, comment: &str) -> Self {
+        self.comment = Some(comment.as_bytes().to_vec());
         self
     }
 
@@ -388,6 +409,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             total_entries,
             cd_size,
             cd_offset,
+            comment: self.comment,
         };
         inner.write_all(&eocdr.serialize()).await?;
         inner.shutdown().await?;
@@ -676,6 +698,26 @@ mod tests {
         let comment_start = 46 + name_len + extra_len;
         let comment = &cd[comment_start..comment_start + comment_len];
         assert_eq!(comment, b"file comment");
+    }
+
+    #[tokio::test]
+    async fn test_archive_comment() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf).with_comment("archive comment");
+        let mut entry = zip
+            .append_file("f.txt", EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(b"data").await.unwrap();
+        entry.close().await.unwrap();
+        zip.finalize().await.unwrap();
+
+        let eocdr_pos = buf.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let comment_len =
+            u16::from_le_bytes(buf[eocdr_pos + 20..eocdr_pos + 22].try_into().unwrap()) as usize;
+        assert_eq!(comment_len, 15, "expected 15-byte archive comment");
+        let comment = &buf[eocdr_pos + 22..eocdr_pos + 22 + comment_len];
+        assert_eq!(comment, b"archive comment");
     }
 
     #[tokio::test]

@@ -40,6 +40,8 @@ pin_project_lite::pin_project! {
         pub(crate) name: String,
         pub(crate) mtime: Option<std::time::SystemTime>,
         pub(crate) unix_permissions: Option<u32>,
+        pub(crate) uid_gid: Option<(u32, u32)>,
+        pub(crate) internal_file_attributes: u16,
     }
 
     impl<W> PinnedDrop for EntryWriter<'_, W>
@@ -74,6 +76,28 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
     /// `S_IFDIR` for directories).
     pub fn set_permissions(&mut self, mode: u32) -> &mut Self {
         self.unix_permissions = Some(mode & 0o7777);
+        self
+    }
+
+    /// Set Unix UID and GID for this entry.
+    ///
+    /// These values are stored in the 0x7875 (Unix UID/GID) extra field
+    /// in the Central Directory entry.
+    pub fn set_uid_gid(&mut self, uid: u32, gid: u32) -> &mut Self {
+        self.uid_gid = Some((uid, gid));
+        self
+    }
+
+    /// Mark this entry as a text file (sets bit 0 of internal file attributes).
+    ///
+    /// Tools like `zipinfo` display text files as `text` and binary files as `binary`.
+    /// By default, all entries are marked as binary.
+    pub fn set_text(&mut self, is_text: bool) -> &mut Self {
+        if is_text {
+            self.internal_file_attributes |= 1;
+        } else {
+            self.internal_file_attributes &= !1;
+        }
         self
     }
 
@@ -145,6 +169,8 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             mtime: mtime_msdos,
             unix_mtime,
             unix_permissions: self.unix_permissions,
+            uid_gid: self.uid_gid,
+            internal_file_attributes: self.internal_file_attributes,
         });
 
         // Return the inner writer to ZipWriter

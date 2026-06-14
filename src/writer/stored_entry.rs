@@ -12,6 +12,8 @@ pub(crate) struct StoredEntry {
     pub(crate) mtime: Option<(u16, u16)>,
     pub(crate) unix_mtime: Option<u64>,
     pub(crate) unix_permissions: Option<u32>,
+    pub(crate) uid_gid: Option<(u32, u32)>,
+    pub(crate) internal_file_attributes: u16,
 }
 
 impl StoredEntry {
@@ -34,6 +36,10 @@ impl StoredEntry {
         if let Some(ts) = self.unix_mtime {
             extra.extend(header::build_extended_timestamp_extra(ts));
         }
+        if has_unix_attrs {
+            let (uid, gid) = self.uid_gid.unwrap_or((0, 0));
+            extra.extend(header::build_unix_uid_gid_extra(uid, gid));
+        }
 
         let file_type_bit: u32 = if self.is_symlink {
             0o120000 // S_IFLNK
@@ -44,7 +50,11 @@ impl StoredEntry {
         };
         let external_file_attributes = match (self.unix_permissions, self.is_symlink) {
             (Some(mode), _) => (mode | file_type_bit) << 16,
-            (None, true) => file_type_bit << 16, // Symlinks always need type bit
+            (None, true) => file_type_bit << 16,
+            (None, false) if has_unix_attrs => {
+                let default_mode = if self.is_directory { 0o755 } else { 0o644 };
+                (default_mode | file_type_bit) << 16
+            }
             (None, false) => 0,
         };
 
@@ -81,6 +91,7 @@ impl StoredEntry {
             extra,
             local_header_offset: self.local_header_offset,
             external_file_attributes,
+            internal_file_attributes: self.internal_file_attributes,
         }
     }
 }
@@ -104,6 +115,8 @@ mod tests {
             mtime: None,
             unix_mtime: None,
             unix_permissions: None,
+            uid_gid: None,
+            internal_file_attributes: 0,
         };
 
         let cd = entry.to_central_dir_entry();
@@ -130,6 +143,8 @@ mod tests {
             mtime: None,
             unix_mtime: None,
             unix_permissions: Some(0o755),
+            uid_gid: Some((1000, 1000)),
+            internal_file_attributes: 0,
         };
 
         let cd = entry.to_central_dir_entry();
@@ -143,6 +158,10 @@ mod tests {
             0o040000 | 0o755,
             "expected S_IFDIR + 0o755, got {:06o}",
             attrs >> 16
+        );
+        assert!(
+            cd.extra.windows(2).any(|w| w == [0x75, 0x78]),
+            "CD extra should contain 0x7875 (Ux) tag for Unix entries"
         );
     }
 
@@ -160,6 +179,8 @@ mod tests {
             mtime: None,
             unix_mtime: None,
             unix_permissions: None,
+            uid_gid: Some((1000, 1000)),
+            internal_file_attributes: 0,
         };
 
         let cd = entry.to_central_dir_entry();
@@ -173,6 +194,10 @@ mod tests {
             0o120000,
             "expected S_IFLNK, got {:06o}",
             attrs >> 16
+        );
+        assert!(
+            cd.extra.windows(2).any(|w| w == [0x75, 0x78]),
+            "CD extra should contain 0x7875 (Ux) tag for symlink entries"
         );
     }
 
@@ -190,6 +215,8 @@ mod tests {
             mtime: Some((0x4A5B, 0x14AF)),
             unix_mtime: Some(1234567890),
             unix_permissions: Some(0o644),
+            uid_gid: Some((1000, 1000)),
+            internal_file_attributes: 0,
         };
 
         let cd = entry.to_central_dir_entry();
@@ -203,6 +230,10 @@ mod tests {
         assert!(
             cd.extra.windows(2).any(|w| w == b"UT"),
             "extra should contain UT (0x5455) tag"
+        );
+        assert!(
+            cd.extra.windows(2).any(|w| w == [0x75, 0x78]),
+            "extra should contain Ux (0x7875) tag"
         );
         let attrs = cd.external_file_attributes;
         assert_eq!(
@@ -229,6 +260,8 @@ mod tests {
             mtime: None,
             unix_mtime: None,
             unix_permissions: None,
+            uid_gid: None,
+            internal_file_attributes: 0,
         };
 
         let cd = entry.to_central_dir_entry();

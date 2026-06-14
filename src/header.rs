@@ -57,8 +57,8 @@ pub(crate) const VERSION_STORED: u16 = 10;
 /// Version needed: 2.0 (20) — supports DEFLATE compression.
 pub(crate) const VERSION_DEFLATE: u16 = 20;
 
-/// Version made by: Unix host OS (upper byte = 3) + deflate support (lower byte = 20).
-pub(crate) const VERSION_UNIX: u16 = (3 << 8) | VERSION_DEFLATE;
+/// Version made by: Unix host OS (upper byte = 3) + version 3.0 (lower byte = 30).
+pub(crate) const VERSION_UNIX: u16 = (3 << 8) | 30;
 
 /// Version needed: 4.5 — supports ZIP64 extensions.
 pub(crate) const VERSION_ZIP64: u16 = 45;
@@ -131,6 +131,22 @@ pub(crate) fn build_extended_timestamp_extra(mtime: u64) -> Vec<u8> {
     put_u16(&mut buf, 5);
     put_u8(&mut buf, 1);
     put_u32(&mut buf, mtime.min(u32::MAX as u64) as u32);
+    buf
+}
+
+/// Build the Unix UID/GID extra field (ID `0x7875`).
+///
+/// Format: header_id (2) + data_size (2) + version (1) + uid_size (1) + uid (4) + gid_size (1) + gid (4)
+/// = 15 bytes total. UID and GID are stored as 32-bit values.
+pub(crate) fn build_unix_uid_gid_extra(uid: u32, gid: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(15);
+    put_u16(&mut buf, 0x7875);
+    put_u16(&mut buf, 11);
+    put_u8(&mut buf, 1); // version
+    put_u8(&mut buf, 4); // uid size
+    put_u32(&mut buf, uid);
+    put_u8(&mut buf, 4); // gid size
+    put_u32(&mut buf, gid);
     buf
 }
 
@@ -349,6 +365,8 @@ pub(crate) struct CentralDirEntry {
     /// External file attributes, host-OS dependent.
     /// For Unix (version_made_by upper byte = 3), upper 16 bits hold st_mode.
     pub(crate) external_file_attributes: u32,
+    /// Internal file attributes (bit 0 = text file).
+    pub(crate) internal_file_attributes: u16,
 }
 
 impl CentralDirEntry {
@@ -421,7 +439,7 @@ impl CentralDirEntry {
         put_u16(&mut buf, extra.len() as u16);
         put_u16(&mut buf, 0); // file comment length
         put_u16(&mut buf, 0); // disk number start
-        put_u16(&mut buf, 0); // internal file attributes
+        put_u16(&mut buf, self.internal_file_attributes);
         put_u32(&mut buf, self.external_file_attributes);
         put_u32(
             &mut buf,
@@ -564,7 +582,8 @@ mod tests {
     fn test_local_file_header_size() {
         let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false);
         let data = lfh.serialize().unwrap();
-        assert_eq!(data.len(), 30 + 8);
+        // LFH: 30 + filename(8) + no extra = 38
+        assert_eq!(data.len(), 38);
         assert_eq!(&data[0..4], &0x04034b50u32.to_le_bytes());
         assert_eq!(&data[8..10], &METHOD_DEFLATE.to_le_bytes());
         assert!(data[6] & (1 << 3) != 0);
@@ -589,13 +608,10 @@ mod tests {
             VERSION_ZIP64,
             "expected VERSION_ZIP64 (45) for ZIP64 LFH"
         );
-        // extra field should not be empty
+        // extra field should contain ZIP64 (4 bytes)
         let name_len = u16::from_le_bytes(data[26..28].try_into().unwrap()) as usize;
         let extra_len = u16::from_le_bytes(data[28..30].try_into().unwrap()) as usize;
-        assert!(
-            extra_len >= 4,
-            "expected non-empty ZIP64 extra field, got {extra_len}"
-        );
+        assert_eq!(extra_len, 4, "expected 4-byte ZIP64 extra, got {extra_len}");
         let extra_start = 30 + name_len;
         let extra = &data[extra_start..extra_start + extra_len];
         // Should contain ZIP64 extra ID 0x0001
@@ -646,6 +662,7 @@ mod tests {
             extra: Vec::new(),
             local_header_offset: 0,
             external_file_attributes: 0,
+            internal_file_attributes: 0,
         };
         let data = cde.serialize().unwrap();
         assert_eq!(&data[0..4], &0x02014b50u32.to_le_bytes());
@@ -670,6 +687,7 @@ mod tests {
             extra: Vec::new(),
             local_header_offset: 0,
             external_file_attributes: 0,
+            internal_file_attributes: 0,
         };
         let data = cde.serialize().unwrap();
 
@@ -816,6 +834,7 @@ mod tests {
             extra: timestamp_extra.clone(),
             local_header_offset: 0,
             external_file_attributes: 0,
+            internal_file_attributes: 0,
         };
         let data = cde.serialize().unwrap();
 
@@ -880,6 +899,7 @@ mod tests {
             extra: Vec::new(),
             local_header_offset: 0,
             external_file_attributes: 0,
+            internal_file_attributes: 0,
         };
         let result = cde.serialize();
         assert!(result.is_err(), "expected Err for oversized filename");

@@ -14,9 +14,11 @@
 
 use async_deflate_zip::{Compression, ZipWriter};
 use std::env;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -103,16 +105,54 @@ async fn add_dir<W: AsyncWriteExt + Unpin>(
             if dir_path == "./" {
                 continue;
             }
-            zip.append_directory(&dir_path).await?.close().await?;
+            let mut dir = zip.append_directory(&dir_path).await?;
+            if let Ok(meta) = fs::metadata(&path).await {
+                if let Ok(mtime) = meta.modified() {
+                    dir.set_mtime(mtime);
+                }
+                #[cfg(unix)]
+                {
+                    dir.set_permissions(meta.mode() & 0o7777);
+                    dir.set_uid_gid(meta.uid(), meta.gid());
+                }
+            }
+            dir.close().await?;
             Box::pin(add_dir(zip, base, &path)).await?;
         } else if file_type.is_file() {
             let mut file = fs::File::open(&path).await?;
             let mut entry = zip.append_file(&relative).await?;
+            if let Ok(meta) = file.metadata().await {
+                if let Ok(mtime) = meta.modified() {
+                    entry.set_mtime(mtime);
+                }
+                #[cfg(unix)]
+                {
+                    entry.set_permissions(meta.mode() & 0o7777);
+                    entry.set_uid_gid(meta.uid(), meta.gid());
+                }
+            }
+            // Mark as text if no null bytes in first 8 KB
+            let mut probe = [0u8; 8192];
+            let n = file.read(&mut probe).await.unwrap_or(0);
+            if n > 0 {
+                entry.set_text(!probe[..n].contains(&0));
+            }
+            entry.write_all(&probe[..n]).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.close().await?;
         } else if file_type.is_symlink() {
             let target = fs::read_link(&path).await?;
             let mut entry = zip.append_file(&relative).await?;
+            if let Ok(meta) = fs::symlink_metadata(&path).await {
+                if let Ok(mtime) = meta.modified() {
+                    entry.set_mtime(mtime);
+                }
+                #[cfg(unix)]
+                {
+                    entry.set_permissions(meta.mode() & 0o7777);
+                    entry.set_uid_gid(meta.uid(), meta.gid());
+                }
+            }
             entry.write_all(target.to_string_lossy().as_bytes()).await?;
             entry.close().await?;
         }

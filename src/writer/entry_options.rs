@@ -15,25 +15,25 @@ use tokio::fs;
 /// modification time, Unix permissions, UID/GID, and file comment.
 ///
 /// Use the convenience constructors for common cases:
-/// - [`file`](WriterOptions::file) — 0644 + current time
-/// - [`directory`](WriterOptions::directory) — 0755 + current time
-/// - [`symlink`](WriterOptions::symlink) — 0777 + current time
-/// - [`from_path`](WriterOptions::from_path) — read metadata from a real file
+/// - [`file`](EntryOptions::file) — 0644 + current time
+/// - [`directory`](EntryOptions::directory) — 0755 + current time
+/// - [`symlink`](EntryOptions::symlink) — 0777 + current time
+/// - [`from_path`](EntryOptions::from_path) — read metadata from a real file
 ///
 /// For full control, construct the struct directly:
 ///
 /// ```rust,no_run
-/// use async_deflate_zip::WriterOptions;
+/// use async_deflate_zip::EntryOptions;
 /// use std::time::SystemTime;
 ///
-/// let opts = WriterOptions {
+/// let opts = EntryOptions {
 ///     mtime: SystemTime::UNIX_EPOCH,
 ///     permissions: Some(0o755),
 ///     uid_gid: Some((1000, 1000)),
 ///     comment: Some("my file".to_string()),
 /// };
 /// ```
-pub struct WriterOptions {
+pub struct EntryOptions {
     /// Last modification time. Stored in MS-DOS format in the fixed CD fields
     /// and as a Unix timestamp in the extended timestamp extra field (0x5455).
     pub mtime: SystemTime,
@@ -49,7 +49,7 @@ pub struct WriterOptions {
     pub comment: Option<String>,
 }
 
-impl Default for WriterOptions {
+impl Default for EntryOptions {
     fn default() -> Self {
         Self {
             mtime: SystemTime::now(),
@@ -60,7 +60,7 @@ impl Default for WriterOptions {
     }
 }
 
-impl WriterOptions {
+impl EntryOptions {
     /// Read metadata (mtime, permissions, uid/gid) from a real filesystem path.
     ///
     /// The file's content is **not** read — only `symlink_metadata` is queried

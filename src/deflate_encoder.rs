@@ -238,16 +238,14 @@ mod tests {
         buf
     }
 
-    #[tokio::test]
-    async fn test_encoder_produces_valid_deflate() {
-        let data = b"Hello, World! This is a test of the deflate encoder.";
-        let compressed = compress(data, Compression::default()).await;
-
-        // Decompress and verify using raw API (decompress_vec may have portability issues)
+    fn decompress(compressed: &[u8], expected_len: usize) -> Vec<u8> {
         let mut decompressor = flate2::Decompress::new(false);
-        let mut raw_out = [0u8; 8192];
+        let mut raw_out = vec![0u8; (expected_len + 8192).max(8192)];
         let (mut in_pos, mut out_len) = (0, 0);
         loop {
+            if out_len >= raw_out.len() {
+                raw_out.resize(raw_out.len() + 65536, 0);
+            }
             let in_bytes = &compressed[in_pos..];
             let out_bytes = &mut raw_out[out_len..];
             let result = decompressor
@@ -260,11 +258,15 @@ mod tests {
                 flate2::Status::Ok | flate2::Status::BufError => continue,
             }
         }
-        assert_eq!(
-            &raw_out[..out_len],
-            data,
-            "round-trip should produce original data"
-        );
+        raw_out[..out_len].to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_encoder_produces_valid_deflate() {
+        let data = b"Hello, World! This is a test of the deflate encoder.";
+        let compressed = compress(data, Compression::default()).await;
+        let decompressed = decompress(&compressed, data.len());
+        assert_eq!(&decompressed, data);
     }
 
     #[tokio::test]
@@ -295,63 +297,24 @@ mod tests {
     async fn test_encoder_empty_input() {
         let data = b"";
         let compressed = compress(data, Compression::default()).await;
-        // Empty input should still produce a valid deflate stream (end marker only)
         assert!(
             !compressed.is_empty(),
             "empty input should produce deflate end marker"
         );
-
-        // Verify it decompresses to empty
-        let mut decompressor = flate2::Decompress::new(false);
-        let mut raw_out = [0u8; 8192];
-        let (mut in_pos, mut out_len) = (0, 0);
-        loop {
-            let in_bytes = &compressed[in_pos..];
-            let out_bytes = &mut raw_out[out_len..];
-            let result = decompressor
-                .decompress(in_bytes, out_bytes, flate2::FlushDecompress::Finish)
-                .unwrap();
-            in_pos = decompressor.total_in() as usize;
-            out_len = decompressor.total_out() as usize;
-            match result {
-                flate2::Status::StreamEnd => break,
-                flate2::Status::Ok | flate2::Status::BufError => continue,
-            }
-        }
-        assert!(out_len == 0, "decompressed should be empty");
+        let decompressed = decompress(&compressed, 0);
+        assert!(decompressed.is_empty(), "decompressed should be empty");
     }
 
     #[tokio::test]
     async fn test_encoder_large_data() {
-        // 100KB of varied data
         let data: Vec<u8> = (0..100_000u32).map(|i| (i % 256) as u8).collect();
         let compressed = compress(&data, Compression::default()).await;
         assert!(
             compressed.len() < data.len(),
             "100KB of cyclic data should compress"
         );
-
-        let mut decompressor = flate2::Decompress::new(false);
-        let mut raw_out = vec![0u8; data.len() + 8192];
-        let (mut in_pos, mut out_len) = (0, 0);
-        loop {
-            let in_bytes = &compressed[in_pos..];
-            let out_bytes = &mut raw_out[out_len..];
-            let result = decompressor
-                .decompress(in_bytes, out_bytes, flate2::FlushDecompress::Finish)
-                .unwrap();
-            in_pos = decompressor.total_in() as usize;
-            out_len = decompressor.total_out() as usize;
-            match result {
-                flate2::Status::StreamEnd => break,
-                flate2::Status::Ok | flate2::Status::BufError => continue,
-            }
-        }
-        assert_eq!(
-            &raw_out[..out_len],
-            &data[..],
-            "round-trip should match for large data"
-        );
+        let decompressed = decompress(&compressed, data.len());
+        assert_eq!(decompressed, data);
     }
 
     #[tokio::test]

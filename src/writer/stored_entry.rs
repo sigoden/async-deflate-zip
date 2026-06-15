@@ -98,6 +98,24 @@ mod tests {
     use super::*;
     use crate::header;
 
+    fn default_entry() -> StoredEntry {
+        StoredEntry {
+            name: String::new(),
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            local_header_offset: 0,
+            is_directory: false,
+            is_symlink: false,
+            is_stored: false,
+            mtime: (0, 0),
+            unix_mtime: 0,
+            unix_permissions: None,
+            uid_gid: None,
+            comment: None,
+        }
+    }
+
     #[test]
     fn test_to_central_dir_entry_basic() {
         let entry = StoredEntry {
@@ -105,15 +123,8 @@ mod tests {
             crc32: 0x12345678,
             compressed_size: 100,
             uncompressed_size: 100,
-            local_header_offset: 0,
-            is_directory: false,
-            is_symlink: false,
             is_stored: true,
-            mtime: (0, 0),
-            unix_mtime: 0,
-            unix_permissions: None,
-            uid_gid: None,
-            comment: None,
+            ..default_entry()
         };
 
         let cd = entry.to_central_dir_entry();
@@ -139,18 +150,10 @@ mod tests {
     fn test_to_central_dir_entry_directory() {
         let entry = StoredEntry {
             name: "mydir/".to_string(),
-            crc32: 0,
-            compressed_size: 0,
-            uncompressed_size: 0,
-            local_header_offset: 0,
             is_directory: true,
-            is_symlink: false,
-            is_stored: false,
-            mtime: (0, 0),
-            unix_mtime: 0,
             unix_permissions: Some(0o755),
             uid_gid: Some((1000, 1000)),
-            comment: None,
+            ..default_entry()
         };
 
         let cd = entry.to_central_dir_entry();
@@ -175,18 +178,11 @@ mod tests {
     fn test_to_central_dir_entry_symlink() {
         let entry = StoredEntry {
             name: "link".to_string(),
-            crc32: 0,
             compressed_size: 8,
             uncompressed_size: 8,
-            local_header_offset: 0,
-            is_directory: false,
             is_symlink: true,
-            is_stored: false,
-            mtime: (0, 0),
-            unix_mtime: 0,
-            unix_permissions: None,
             uid_gid: Some((1000, 1000)),
-            comment: None,
+            ..default_entry()
         };
 
         let cd = entry.to_central_dir_entry();
@@ -215,14 +211,12 @@ mod tests {
             compressed_size: 50,
             uncompressed_size: 50,
             local_header_offset: 42,
-            is_directory: false,
-            is_symlink: false,
             is_stored: true,
             mtime: (0x4A5B, 0x14AF),
             unix_mtime: 1234567890,
             unix_permissions: Some(0o644),
             uid_gid: Some((1000, 1000)),
-            comment: None,
+            ..default_entry()
         };
 
         let cd = entry.to_central_dir_entry();
@@ -252,22 +246,12 @@ mod tests {
 
     #[test]
     fn test_to_central_dir_entry_zip64() {
-        // When compressed/uncompressed/local_header exceed U32_MAX, version_needed
-        // should be VERSION_ZIP64.
         let entry = StoredEntry {
             name: "big.bin".to_string(),
-            crc32: 0,
             compressed_size: header::U32_MAX + 1,
             uncompressed_size: header::U32_MAX + 1,
             local_header_offset: header::U32_MAX + 1,
-            is_directory: false,
-            is_symlink: false,
-            is_stored: false,
-            mtime: (0, 0),
-            unix_mtime: 0,
-            unix_permissions: None,
-            uid_gid: None,
-            comment: None,
+            ..default_entry()
         };
 
         let cd = entry.to_central_dir_entry();

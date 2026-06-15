@@ -12,6 +12,31 @@ use std::task::{Context, Poll};
 use std::time::SystemTime;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+/// Dispatch an `AsyncWrite` method to the active writer (stored or deflated).
+/// Returns `Poisoned` error if the entry has already been closed.
+macro_rules! poll_active_writer {
+    ($this:expr, $cx:expr, $method:ident $(, $args:expr)*) => {{
+        let writer: Option<Pin<&mut dyn AsyncWrite>> = if *$this.is_stored {
+            $this.passthrough
+                .as_pin_mut()
+                .map(|w| w as Pin<&mut dyn AsyncWrite>)
+        } else {
+            $this.deflate_encoder
+                .as_pin_mut()
+                .map(|e| e as Pin<&mut dyn AsyncWrite>)
+        };
+        match writer {
+            Some(mut w) => w.as_mut().$method($cx $(, $args)*),
+            None => {
+                $this.zip.poisoned = true;
+                Poll::Ready(Err(io::Error::other(ZipError::Poisoned(
+                    "entry already closed".to_string(),
+                ))))
+            }
+        }
+    }};
+}
+
 pin_project_lite::pin_project! {
     /// A streaming writer for a single file entry in a ZIP archive.
     ///
@@ -145,29 +170,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.project();
-        let result = if *this.is_stored {
-            match this.passthrough.as_pin_mut() {
-                Some(w) => w.poll_write(cx, buf),
-                None => {
-                    this.zip.poisoned = true;
-                    return Poll::Ready(Err(ZipError::Poisoned(
-                        "write after entry closed".to_string(),
-                    )
-                    .into()));
-                }
-            }
-        } else {
-            match this.deflate_encoder.as_pin_mut() {
-                Some(e) => e.poll_write(cx, buf),
-                None => {
-                    this.zip.poisoned = true;
-                    return Poll::Ready(Err(ZipError::Poisoned(
-                        "write after entry closed".to_string(),
-                    )
-                    .into()));
-                }
-            }
-        };
+        let result = poll_active_writer!(this, cx, poll_write, buf);
         match result {
             Poll::Ready(Ok(n)) => {
                 this.crc_hasher.update(&buf[..n]);
@@ -180,56 +183,12 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.project();
-        if *this.is_stored {
-            match this.passthrough.as_pin_mut() {
-                Some(w) => w.poll_flush(cx),
-                None => {
-                    this.zip.poisoned = true;
-                    Poll::Ready(Err(ZipError::Poisoned(
-                        "flush after entry closed".to_string(),
-                    )
-                    .into()))
-                }
-            }
-        } else {
-            match this.deflate_encoder.as_pin_mut() {
-                Some(e) => e.poll_flush(cx),
-                None => {
-                    this.zip.poisoned = true;
-                    Poll::Ready(Err(ZipError::Poisoned(
-                        "flush after entry closed".to_string(),
-                    )
-                    .into()))
-                }
-            }
-        }
+        poll_active_writer!(this, cx, poll_flush)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.project();
-        if *this.is_stored {
-            match this.passthrough.as_pin_mut() {
-                Some(w) => w.poll_shutdown(cx),
-                None => {
-                    this.zip.poisoned = true;
-                    Poll::Ready(Err(ZipError::Poisoned(
-                        "shutdown after entry closed".to_string(),
-                    )
-                    .into()))
-                }
-            }
-        } else {
-            match this.deflate_encoder.as_pin_mut() {
-                Some(e) => e.poll_shutdown(cx),
-                None => {
-                    this.zip.poisoned = true;
-                    Poll::Ready(Err(ZipError::Poisoned(
-                        "shutdown after entry closed".to_string(),
-                    )
-                    .into()))
-                }
-            }
-        }
+        poll_active_writer!(this, cx, poll_shutdown)
     }
 }
 
@@ -286,40 +245,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_entry_permissions() {
-        let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf);
-        let mut entry = zip
-            .append_file("perm_test.txt", opts_perms(0o644))
-            .await
-            .unwrap();
-        entry.write_all(b"test").await.unwrap();
-        entry.close().await.unwrap();
-        zip.finalize().await.unwrap();
-
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
-        assert_eq!(efa, ((0o644 | 0o100000) as u32) << 16);
-        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
-        assert!(vmb >> 8 == 3, "expected Unix host OS");
-    }
-
-    #[tokio::test]
-    async fn test_entry_setuid_permissions() {
-        let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf);
-        let mut entry = zip
-            .append_file("setuid_test.txt", opts_perms(0o4755))
-            .await
-            .unwrap();
-        entry.write_all(b"test").await.unwrap();
-        entry.close().await.unwrap();
-        zip.finalize().await.unwrap();
-
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
-        assert_eq!(efa, ((0o4755 | 0o100000) as u32) << 16);
+        for (mode, name) in [(0o644, "perm_test.txt"), (0o4755, "setuid_test.txt")] {
+            let mut buf = Vec::new();
+            let mut zip = ZipWriter::new(&mut buf);
+            let mut entry = zip.append_file(name, opts_perms(mode)).await.unwrap();
+            entry.write_all(b"test").await.unwrap();
+            entry.close().await.unwrap();
+            zip.finalize().await.unwrap();
+            let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+            let cd = &buf[pos..];
+            let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
+            assert_eq!(efa, (mode | 0o100000) << 16, "mode {mode:04o}");
+            let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
+            assert!(vmb >> 8 == 3, "expected Unix host OS for mode {mode:04o}");
+        }
     }
 
     #[tokio::test]

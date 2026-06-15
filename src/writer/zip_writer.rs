@@ -1,6 +1,6 @@
 use super::entry_options::EntryOptions;
 use super::entry_writer::EntryWriter;
-use super::helpers::CountWriter;
+use super::helpers::{CountWriter, sanitize_path};
 use super::stored_entry::StoredEntry;
 
 use crate::deflate_encoder::DeflateEncoder;
@@ -8,7 +8,6 @@ use crate::error::ZipError;
 use crate::header;
 
 use flate2::Compression;
-use std::borrow::Cow;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// A streaming ZIP archive writer with per-file deflate compression.
@@ -97,6 +96,17 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         self
     }
 
+    /// Take ownership of the inner writer, returning an error if it's already taken.
+    fn take_inner(&mut self, context: &str) -> Result<W, ZipError> {
+        self.inner.take().ok_or_else(|| {
+            if self.poisoned {
+                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
+            } else {
+                ZipError::InvalidState(context.to_string())
+            }
+        })
+    }
+
     /// Start a new file entry and return an [`EntryWriter`] for streaming data.
     ///
     /// Writes the Local File Header, then returns an `EntryWriter` that
@@ -128,14 +138,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         name: &str,
         options: EntryOptions,
     ) -> Result<EntryWriter<'a, W>, ZipError> {
-        let mut inner = self.inner.take().ok_or_else(|| {
-            if self.poisoned {
-                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
-            } else {
-                ZipError::InvalidState("entry writer already active".to_string())
-            }
-        })?;
-
+        let mut inner = self.take_inner("entry writer already active")?;
         let name = sanitize_path(name, false);
 
         let is_stored = self.level.level() == 0;
@@ -206,14 +209,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         name: &str,
         options: EntryOptions,
     ) -> Result<(), ZipError> {
-        let mut inner = self.inner.take().ok_or_else(|| {
-            if self.poisoned {
-                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
-            } else {
-                ZipError::InvalidState("entry writer already active".to_string())
-            }
-        })?;
-
+        let mut inner = self.take_inner("entry writer already active")?;
         let name = sanitize_path(name, true);
 
         let needs_zip64 = self.pos > header::U32_MAX;
@@ -293,13 +289,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ) -> Result<(), ZipError> {
         let name = sanitize_path(path, false);
         let target = sanitize_path(target, false);
-        let mut inner = self.inner.take().ok_or_else(|| {
-            if self.poisoned {
-                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
-            } else {
-                ZipError::InvalidState("entry writer already active".to_string())
-            }
-        })?;
+        let mut inner = self.take_inner("entry writer already active")?;
         let needs_zip64 = self.pos > header::U32_MAX;
         let lfh =
             header::LocalFileHeader::new(&name, header::METHOD_STORED, needs_zip64, options.mtime);
@@ -368,13 +358,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// poisoned, if writing the Central Directory or EOCDR fails (I/O error or
     /// field too long), or if the inner writer's shutdown fails.
     pub async fn finalize(mut self) -> Result<(), ZipError> {
-        let mut inner = self.inner.take().ok_or_else(|| {
-            if self.poisoned {
-                ZipError::Poisoned("previous entry was dropped without calling close()".to_string())
-            } else {
-                ZipError::InvalidState("entry writer still active".to_string())
-            }
-        })?;
+        let mut inner = self.take_inner("entry writer still active")?;
         let cd_offset = self.pos;
 
         for entry in &self.entries {
@@ -417,23 +401,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     }
 }
 
-fn sanitize_path(name: &str, is_directory: bool) -> Cow<'_, str> {
-    let sanitized = if name.contains('\\') {
-        Cow::Owned(name.replace('\\', "/"))
-    } else {
-        Cow::Borrowed(name)
-    };
-    if is_directory && !sanitized.ends_with('/') {
-        Cow::Owned(format!("{sanitized}/"))
-    } else {
-        sanitized
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::writer::test_utils::lookup_entry;
     use flate2::Compression;
     use tokio::io::AsyncWriteExt;
 
@@ -493,12 +463,13 @@ mod tests {
         entry.close().await.unwrap();
         zip.finalize().await.unwrap();
 
-        let entry = lookup_entry(&buf, 0);
+        let cd_pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let compressed_size = u32::from_le_bytes(buf[cd_pos + 20..cd_pos + 24].try_into().unwrap());
+        let uncompressed_size =
+            u32::from_le_bytes(buf[cd_pos + 24..cd_pos + 28].try_into().unwrap());
         assert!(
-            entry.compressed_size < entry.uncompressed_size,
-            "compressed {} >= uncompressed {}",
-            entry.compressed_size,
-            entry.uncompressed_size
+            compressed_size < uncompressed_size,
+            "compressed {compressed_size} >= uncompressed {uncompressed_size}"
         );
     }
 
@@ -668,7 +639,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_entry_comment() {
+    async fn test_entry_comment() {
+        // File entry with comment
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
@@ -686,18 +658,40 @@ mod tests {
         entry.write_all(b"data").await.unwrap();
         entry.close().await.unwrap();
         zip.finalize().await.unwrap();
-
         let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
         let cd = &buf[pos..];
-
         let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
         let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
         let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
-        assert_eq!(comment_len, 12, "expected 12-byte comment");
-
+        assert_eq!(comment_len, 12);
         let comment_start = 46 + name_len + extra_len;
         let comment = &cd[comment_start..comment_start + comment_len];
         assert_eq!(comment, b"file comment");
+
+        // Directory entry with comment
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        zip.append_directory(
+            "dir/",
+            EntryOptions {
+                mtime: std::time::SystemTime::now(),
+                permissions: Some(0o755),
+                uid_gid: None,
+                comment: Some("dir comment".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        zip.finalize().await.unwrap();
+        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let cd = &buf[pos..];
+        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
+        let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
+        assert_eq!(comment_len, 11);
+        let comment_start = 46 + name_len + extra_len;
+        let comment = &cd[comment_start..comment_start + comment_len];
+        assert_eq!(comment, b"dir comment");
     }
 
     #[tokio::test]
@@ -718,35 +712,5 @@ mod tests {
         assert_eq!(comment_len, 15, "expected 15-byte archive comment");
         let comment = &buf[eocdr_pos + 22..eocdr_pos + 22 + comment_len];
         assert_eq!(comment, b"archive comment");
-    }
-
-    #[tokio::test]
-    async fn test_directory_entry_comment() {
-        let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf);
-        zip.append_directory(
-            "dir/",
-            EntryOptions {
-                mtime: std::time::SystemTime::now(),
-                permissions: Some(0o755),
-                uid_gid: None,
-                comment: Some("dir comment".to_string()),
-            },
-        )
-        .await
-        .unwrap();
-        zip.finalize().await.unwrap();
-
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-
-        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
-        assert_eq!(comment_len, 11, "expected 11-byte comment");
-
-        let comment_start = 46 + name_len + extra_len;
-        let comment = &cd[comment_start..comment_start + comment_len];
-        assert_eq!(comment, b"dir comment");
     }
 }

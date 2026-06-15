@@ -7,6 +7,3 @@ mod zip_writer;
 pub use entry_options::EntryOptions;
 pub use entry_writer::EntryWriter;
 pub use zip_writer::ZipWriter;
-
-#[cfg(test)]
-mod test_utils;

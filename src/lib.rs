@@ -21,7 +21,7 @@
 //! let mut buf = Vec::new();
 //! let mut zip = ZipWriter::new(&mut buf);
 //!
-//! let mut entry = zip.start_file("hello.txt", EntryOptions::file()).await.unwrap();
+//! let mut entry = zip.start_file("hello.txt", &EntryOptions::file()).await.unwrap();
 //! entry.write_all(b"Hello, World!").await.unwrap();
 //! entry.finish().await.unwrap();
 //!
@@ -32,8 +32,12 @@
 mod count_writer;
 mod deflate_encoder;
 mod error;
+mod validate;
 mod writer;
 mod zip_format;
+
+#[cfg(test)]
+mod test_utils;
 
 pub use error::ZipError;
 pub type CompressionLevel = flate2::Compression;

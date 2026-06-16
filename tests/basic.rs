@@ -11,7 +11,7 @@ async fn basic_single_file() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, EntryOptions::file())
+    zip.add_reader(name, content, &EntryOptions::file())
         .await
         .unwrap();
     zip.finish().await.unwrap();
@@ -34,7 +34,7 @@ async fn basic_multiple_files() {
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
     for (name, content) in &files {
-        zip.add_reader(name, *content, EntryOptions::file())
+        zip.add_reader(name, *content, &EntryOptions::file())
             .await
             .unwrap();
     }
@@ -65,13 +65,13 @@ async fn basic_disk_files() {
     let mut zip = ZipWriter::new(file);
     let file1 = tokio::fs::File::open(&src1_path).await.unwrap();
     let opts1 = EntryOptions::from_path(&src1_path).await.unwrap();
-    zip.add_reader("from_reader.txt", file1, opts1)
+    zip.add_reader("from_reader.txt", file1, &opts1)
         .await
         .unwrap();
 
     // Method 2: start_file + tokio::io::copy
     let opts2 = EntryOptions::from_path(&src2_path).await.unwrap();
-    let mut entry = zip.start_file("from_copy.txt", opts2).await.unwrap();
+    let mut entry = zip.start_file("from_copy.txt", &opts2).await.unwrap();
     let mut file2 = tokio::fs::File::open(&src2_path).await.unwrap();
     tokio::io::copy(&mut file2, &mut entry).await.unwrap();
     entry.finish().await.unwrap();

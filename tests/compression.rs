@@ -9,7 +9,7 @@ async fn write_zip(level: CompressionLevel) -> (tempfile::TempDir, std::path::Pa
     let (_dir, zip_path) = common::zip::zip_path("compression");
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_compression_level(level);
-    zip.add_reader(name, content.as_slice(), EntryOptions::file())
+    zip.add_reader(name, content.as_slice(), &EntryOptions::file())
         .await
         .unwrap();
     zip.finish().await.unwrap();
@@ -49,10 +49,10 @@ async fn compression_stored() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_compression_level(CompressionLevel::none());
-    zip.add_reader(name1, content1, EntryOptions::file())
+    zip.add_reader(name1, content1, &EntryOptions::file())
         .await
         .unwrap();
-    zip.add_reader(name2, content2, EntryOptions::file())
+    zip.add_reader(name2, content2, &EntryOptions::file())
         .await
         .unwrap();
     zip.finish().await.unwrap();

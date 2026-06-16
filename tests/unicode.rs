@@ -10,7 +10,7 @@ async fn unicode_german() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, EntryOptions::file())
+    zip.add_reader(name, content, &EntryOptions::file())
         .await
         .unwrap();
     zip.finish().await.unwrap();
@@ -27,7 +27,7 @@ async fn unicode_chinese() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, EntryOptions::file())
+    zip.add_reader(name, content, &EntryOptions::file())
         .await
         .unwrap();
     zip.finish().await.unwrap();
@@ -42,7 +42,7 @@ async fn unicode_directory() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_directory("목차/", EntryOptions::directory())
+    zip.add_directory("목차/", &EntryOptions::directory())
         .await
         .unwrap();
     zip.finish().await.unwrap();

@@ -19,6 +19,12 @@ pub enum ZipError {
         max: usize,
     },
 
+    /// Invalid input was provided (e.g. empty name, null byte).
+    InvalidInput {
+        /// Description of the validation failure.
+        reason: &'static str,
+    },
+
     /// The writer is in a corrupted state (e.g. entry dropped without finish).
     EntryWriterCorrupted,
 
@@ -33,6 +39,7 @@ impl fmt::Display for ZipError {
             Self::FieldTooLong { field, len, max } => {
                 write!(f, "{field} too long: {len} bytes (max {max})")
             }
+            Self::InvalidInput { reason } => write!(f, "invalid input: {reason}"),
             Self::EntryWriterCorrupted => write!(f, "entry writer corrupted"),
             Self::WriterCorrupted => write!(f, "writer corrupted"),
         }
@@ -58,7 +65,9 @@ impl From<ZipError> for io::Error {
     fn from(err: ZipError) -> Self {
         match err {
             ZipError::Io(e) => e,
-            ZipError::FieldTooLong { .. } => io::Error::new(io::ErrorKind::InvalidInput, err),
+            ZipError::FieldTooLong { .. } | ZipError::InvalidInput { .. } => {
+                io::Error::new(io::ErrorKind::InvalidInput, err)
+            }
             ZipError::EntryWriterCorrupted => io::Error::other(err),
             ZipError::WriterCorrupted => io::Error::other(err),
         }

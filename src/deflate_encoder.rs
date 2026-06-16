@@ -6,6 +6,9 @@ use crate::CompressionLevel;
 use flate2::{Compress, FlushCompress, Status};
 use tokio::io::AsyncWrite;
 
+/// Maximum output buffer size (64 KB).
+const MAX_OUT_BUF: usize = 65536;
+
 /// Async-only Deflate encoder implementing `tokio::io::AsyncWrite`.
 ///
 /// Wraps an inner `AsyncWrite` and compresses data written through it
@@ -17,7 +20,7 @@ use tokio::io::AsyncWrite;
 /// `poll_shutdown` finalizes the deflate stream and drains any remaining
 /// compressed output to the inner writer, but does NOT propagate shutdown
 /// to the inner writer. This allows the caller (EntryWriter::close) to
-/// write a ZIP Data Descriptor after the compressed data stream.
+/// write a ZIP Data Descriptor after the compressed stream.
 pub(crate) struct DeflateEncoder<W: AsyncWrite + Unpin> {
     inner: W,
     compress: Compress,
@@ -32,11 +35,17 @@ pub(crate) struct DeflateEncoder<W: AsyncWrite + Unpin> {
 impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
     /// Create a new `DeflateEncoder` wrapping `inner` with the given compression level.
     pub(crate) fn new(inner: W, level: CompressionLevel) -> Self {
+        let initial_size = match level.level() {
+            0 => 32768,
+            1..=2 => 16384,
+            3..=6 => 8192,
+            _ => 4096,
+        };
         Self {
             inner,
             // false = raw deflate (no zlib header/trailer)
             compress: Compress::new(level, false),
-            out_buf: vec![0u8; 8192],
+            out_buf: vec![0u8; initial_size],
             out_pos: 0,
             out_len: 0,
             finished: false,
@@ -96,7 +105,17 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
         let consumed = (self.compress.total_in() - before_in) as usize;
         let produced = (self.compress.total_out() - before_out) as usize;
 
-        // Mark the newly produced bytes for subsequent drain.
+        // If BufError with no progress and the buffer is below max, grow it and retry.
+        if matches!(status, Status::BufError)
+            && consumed == 0
+            && produced == 0
+            && self.out_buf.len() < MAX_OUT_BUF
+        {
+            let new_len = (self.out_buf.len() * 2).min(MAX_OUT_BUF);
+            self.out_buf.resize(new_len, 0);
+            return self.do_compress(input, flush);
+        }
+
         self.out_pos = 0;
         self.out_len = produced;
 

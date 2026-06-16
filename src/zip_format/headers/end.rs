@@ -88,7 +88,7 @@ impl Zip64EocdrLocator {
 
 #[cfg(test)]
 mod tests {
-    use crate::zip_format::binary::*;
+    use crate::zip_format::binary::test_utils::*;
     use crate::zip_format::*;
 
     #[test]

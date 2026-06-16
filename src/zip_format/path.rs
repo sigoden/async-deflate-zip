@@ -1,14 +1,34 @@
+use std::borrow::Cow;
+
 fn is_windows_drive_letter(component: &str) -> bool {
     component.len() == 2
         && component.as_bytes()[0].is_ascii_alphabetic()
         && component.as_bytes()[1] == b':'
 }
 
-pub(crate) fn sanitize_path(path: &str) -> String {
+pub(crate) fn sanitize_path(path: &str) -> Cow<'_, str> {
+    if !path.contains('\\') {
+        let mut clean = true;
+        for component in path.split('/') {
+            match component {
+                "" | "." | ".." => {
+                    clean = false;
+                    break;
+                }
+                _ if is_windows_drive_letter(component) => {
+                    clean = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if clean {
+            return Cow::Borrowed(path);
+        }
+    }
+
     let path = path.replace('\\', "/");
-
     let mut components: Vec<&str> = Vec::new();
-
     for component in path.split('/') {
         match component {
             "" | "." => {}
@@ -21,8 +41,7 @@ pub(crate) fn sanitize_path(path: &str) -> String {
             }
         }
     }
-
-    components.join("/")
+    Cow::Owned(components.join("/"))
 }
 
 #[cfg(test)]

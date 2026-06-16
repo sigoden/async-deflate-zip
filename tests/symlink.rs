@@ -9,10 +9,10 @@ async fn symlink_basic() {
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
-    zip.add_symlink("link.txt", "hello.txt", EntryOptions::symlink())
+    zip.add_symlink("link.txt", "hello.txt", &EntryOptions::symlink())
         .await
         .unwrap();
-    zip.add_symlink("sub/alink", "../link.txt", EntryOptions::symlink())
+    zip.add_symlink("sub/alink", "../link.txt", &EntryOptions::symlink())
         .await
         .unwrap();
 

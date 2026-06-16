@@ -15,7 +15,7 @@ async fn zip64_many_entries() {
     let count = 0xFFFF + 1;
     for i in 0..count {
         let name = format!("files/f{i}");
-        let mut entry = zip.start_file(&name, EntryOptions::file()).await.unwrap();
+        let mut entry = zip.start_file(&name, &EntryOptions::file()).await.unwrap();
         entry.write_all(b"x").await.unwrap();
         entry.finish().await.unwrap();
     }

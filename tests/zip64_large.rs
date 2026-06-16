@@ -39,12 +39,12 @@ async fn zip64_large_file() {
     let reader = HugeReader {
         remaining: 5_000_000_000,
     };
-    zip.add_reader("huge.bin", reader, EntryOptions::file())
+    zip.add_reader("huge.bin", reader, &EntryOptions::file())
         .await
         .unwrap();
 
     let mut entry = zip
-        .start_file("readme.txt", EntryOptions::file())
+        .start_file("readme.txt", &EntryOptions::file())
         .await
         .unwrap();
     tokio::io::AsyncWriteExt::write_all(&mut entry, b"This archive contains a >4GB file.")

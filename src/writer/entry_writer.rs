@@ -137,7 +137,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
         // Update position tracker: compressed data + data descriptor
         self.zip.pos += compressed_size + dd_bytes.len() as u64;
 
-        let (mtime_msdos, unix_mtime) = zip_format::mtime_to_ms_dos_and_unix(self.mtime);
+        let unix_mtime = zip_format::system_time_to_unix_secs(self.mtime);
 
         self.zip.entries.push(StoredEntry {
             name: self.name.clone(),
@@ -148,7 +148,6 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             is_directory: false,
             is_symlink: false,
             is_stored: self.is_stored,
-            mtime: mtime_msdos,
             unix_mtime,
             unix_permissions: self.unix_permissions,
             uid_gid: self.uid_gid,
@@ -194,6 +193,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
 mod tests {
     use super::super::*;
     use crate::ZipError;
+    use crate::test_utils::*;
     use std::time::SystemTime;
     use tokio::io::AsyncWriteExt;
 
@@ -204,7 +204,7 @@ mod tests {
         let mut entry = zip
             .start_file(
                 "epoch.txt",
-                EntryOptions::file()
+                &EntryOptions::file()
                     .with_mtime(SystemTime::UNIX_EPOCH)
                     .with_unix_permissions(0o644),
             )
@@ -214,19 +214,22 @@ mod tests {
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-
-        let time = u16::from_le_bytes(cd[12..14].try_into().unwrap());
-        let date = u16::from_le_bytes(cd[14..16].try_into().unwrap());
         let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
         let local_epoch =
             time::OffsetDateTime::from(SystemTime::UNIX_EPOCH).to_offset(local_offset);
-        let expected_time = (local_epoch.hour() as u16) << 11
-            | (local_epoch.minute() as u16) << 5
-            | (local_epoch.second() as u16).div_ceil(2);
-        assert_eq!(time, expected_time, "expected local time for epoch");
-        assert_eq!(date, (1 << 5) | 1, "expected MS-DOS date for 1980-01-01");
+
+        assert_last_modified(
+            &buf,
+            "epoch.txt",
+            (
+                1980,
+                1,
+                1,
+                local_epoch.hour(),
+                local_epoch.minute(),
+                local_epoch.second().div_ceil(2) * 2,
+            ),
+        );
     }
 
     #[tokio::test]
@@ -235,18 +238,13 @@ mod tests {
             let mut buf = Vec::new();
             let mut zip = ZipWriter::new(&mut buf);
             let mut entry = zip
-                .start_file(name, EntryOptions::file().with_unix_permissions(mode))
+                .start_file(name, &EntryOptions::file().with_unix_permissions(mode))
                 .await
                 .unwrap();
             entry.write_all(b"test").await.unwrap();
             entry.finish().await.unwrap();
             zip.finish().await.unwrap();
-            let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-            let cd = &buf[pos..];
-            let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
-            assert_eq!(efa, (mode | 0o100000) << 16, "mode {mode:04o}");
-            let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
-            assert!(vmb >> 8 == 3, "expected Unix host OS for mode {mode:04o}");
+            assert_unix_mode(&buf, name, mode | 0o100000);
         }
     }
 
@@ -255,31 +253,14 @@ mod tests {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
-            .start_file("mtime_test.txt", EntryOptions::file())
+            .start_file("mtime_test.txt", &EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(b"hello").await.unwrap();
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
-
-        let extra_start = 46 + name_len;
-        let extra = &cd[extra_start..extra_start + extra_len];
-        let has_ts_extra = extra.windows(2).any(|w| w == b"UT");
-        assert!(
-            has_ts_extra,
-            "CD entry extra should contain extended timestamp (0x5455/UT) when mtime is set"
-        );
-        assert!(
-            extra_len >= 4,
-            "extra_len should be >= 4 when mtime is set, got {extra_len}"
-        );
-        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
-        assert_eq!(vmb >> 8, 3, "expected Unix host OS when mtime is set");
+        assert_extra_has_tag(&buf, "mtime_test.txt", b"UT");
     }
 
     #[tokio::test]
@@ -288,12 +269,12 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
 
         drop(
-            zip.start_file("lost.txt", EntryOptions::file())
+            zip.start_file("lost.txt", &EntryOptions::file())
                 .await
                 .unwrap(),
         );
 
-        let result = zip.start_file("another.txt", EntryOptions::file()).await;
+        let result = zip.start_file("another.txt", &EntryOptions::file()).await;
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.err().unwrap();
         assert!(
@@ -308,7 +289,7 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
 
         drop(
-            zip.start_file("lost.txt", EntryOptions::file())
+            zip.start_file("lost.txt", &EntryOptions::file())
                 .await
                 .unwrap(),
         );

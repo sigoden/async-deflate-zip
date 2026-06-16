@@ -115,3 +115,97 @@ impl DataDescriptor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::zip_format::binary::*;
+    use crate::zip_format::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn test_lfh_normal_case() {
+        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false, SystemTime::UNIX_EPOCH);
+        let data = lfh.serialize().unwrap();
+        assert_eq!(data.len(), 47);
+        assert_eq!(read_u32(&data, 0), LFH_SIG);
+        assert_eq!(read_u16(&data, 8), METHOD_DEFLATE);
+        assert!(data[6] & (1 << 3) != 0);
+        assert_eq!(read_u16(&data, 4), VERSION_DEFLATE);
+        assert_eq!(read_u16(&data, 28) as usize, 9);
+    }
+
+    #[test]
+    fn test_lfh_zip64_case() {
+        let lfh = LocalFileHeader::new("bigfile.bin", METHOD_DEFLATE, true, SystemTime::UNIX_EPOCH);
+        let data = lfh.serialize().unwrap();
+        assert_eq!(read_u16(&data, 4), VERSION_ZIP64);
+        let name_len = read_u16(&data, 26) as usize;
+        let extra_len = read_u16(&data, 28) as usize;
+        assert_eq!(extra_len, 13);
+        let extra_start = 30 + name_len;
+        let extra = &data[extra_start..extra_start + extra_len];
+        assert_eq!(read_u16(extra, 0), 0x5455);
+        assert_eq!(read_u16(extra, 9), 0x0001);
+
+        let lfh = LocalFileHeader::new("bigdir", METHOD_STORED, true, SystemTime::UNIX_EPOCH);
+        let data = lfh.serialize().unwrap();
+        assert_eq!(read_u16(&data, 4), VERSION_ZIP64);
+    }
+
+    #[test]
+    fn test_lfh_field_too_long() {
+        let name = "a".repeat(65536);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false, SystemTime::UNIX_EPOCH);
+        let result = lfh.serialize();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("filename too long")
+        );
+    }
+
+    #[test]
+    fn test_dd_normal_case() {
+        let dd = DataDescriptor {
+            crc32: 0x12345678,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            zip64: false,
+        };
+        let data = dd.serialize();
+        assert_eq!(data.len(), 16);
+        assert_eq!(read_u32(&data, 0), DD_SIG);
+        assert_eq!(read_u32(&data, 4), 0x12345678);
+        assert_eq!(read_u32(&data, 8), 100);
+        assert_eq!(read_u32(&data, 12), 200);
+    }
+
+    #[test]
+    fn test_dd_zip64_case() {
+        let dd = DataDescriptor {
+            crc32: 0x12345678,
+            compressed_size: 5_000_000_000,
+            uncompressed_size: 10_000_000_000,
+            zip64: true,
+        };
+        let data = dd.serialize();
+        assert_eq!(data.len(), 24);
+        assert_eq!(read_u32(&data, 4), 0x12345678);
+        assert_eq!(read_u64(&data, 8), 5_000_000_000);
+        assert_eq!(read_u64(&data, 16), 10_000_000_000);
+
+        let dd = DataDescriptor {
+            crc32: 0xDEADBEEF,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            zip64: true,
+        };
+        let data = dd.serialize();
+        assert_eq!(data.len(), 24);
+        assert_eq!(read_u32(&data, 4), 0xDEADBEEF);
+        assert_eq!(read_u64(&data, 8), 100);
+        assert_eq!(read_u64(&data, 16), 200);
+    }
+}

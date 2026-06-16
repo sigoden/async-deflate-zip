@@ -22,3 +22,30 @@ pub(crate) fn mtime_to_ms_dos_and_unix(mtime: SystemTime) -> ((u16, u16), u64) {
         .as_secs();
     ((time, date), secs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn test_system_time_to_ms_dos() {
+        let (time, date) = system_time_to_ms_dos(SystemTime::UNIX_EPOCH);
+
+        let hour = time >> 11;
+        let min = (time >> 5) & 0x3F;
+        let sec = (time & 0x1F) * 2;
+        assert!(hour <= 23);
+        assert!(min <= 59);
+        assert!(sec <= 59);
+
+        let year = (date >> 9) + 1980;
+        let month = (date >> 5) & 0x0F;
+        let day = date & 0x1F;
+        assert!((1980..=2107).contains(&year));
+        assert!((1..=12).contains(&month));
+        assert!((1..=31).contains(&day));
+
+        assert_eq!(year, 1980);
+    }
+}

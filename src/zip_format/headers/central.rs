@@ -115,3 +115,133 @@ impl CentralDirEntry {
         Ok(buf)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::zip_format::binary::*;
+    use crate::zip_format::*;
+
+    #[test]
+    fn test_cd_normal_case() {
+        let cde = CentralDirEntry {
+            version_made_by: VERSION_DEFLATE,
+            version_needed: VERSION_DEFLATE,
+            flags: FLAG_DATA_DESC,
+            method: METHOD_DEFLATE,
+            time: 0,
+            date: 0,
+            crc32: 0xDEADBEEF,
+            compressed_size: 500,
+            uncompressed_size: 1000,
+            name: b"test.txt".to_vec(),
+            extra: Vec::new(),
+            local_header_offset: 0,
+            external_file_attributes: 0,
+            comment: None,
+        };
+        let data = cde.serialize().unwrap();
+        assert_eq!(read_u32(&data, 0), CD_SIG);
+        assert_eq!(read_u32(&data, 16), 0xDEADBEEF);
+        assert_eq!(read_u32(&data, 20), 500);
+        assert_eq!(read_u32(&data, 24), 1000);
+    }
+
+    #[test]
+    fn test_cd_zip64_case() {
+        let cde = CentralDirEntry {
+            version_made_by: VERSION_DEFLATE,
+            version_needed: VERSION_DEFLATE,
+            flags: FLAG_DATA_DESC,
+            method: METHOD_DEFLATE,
+            time: 0,
+            date: 0,
+            crc32: 0,
+            compressed_size: 5_000_000_000,
+            uncompressed_size: 10_000_000_000,
+            name: b"big_file.bin".to_vec(),
+            extra: Vec::new(),
+            local_header_offset: 0,
+            external_file_attributes: 0,
+            comment: None,
+        };
+        let data = cde.serialize().unwrap();
+        assert_eq!(read_u32(&data, 0), CD_SIG);
+        assert_eq!(read_u32(&data, 20), u32::MAX);
+        assert_eq!(read_u32(&data, 24), u32::MAX);
+        assert_eq!(read_u16(&data, 6), VERSION_ZIP64);
+        let name_len = read_u16(&data, 28) as usize;
+        let extra_len = read_u16(&data, 30) as usize;
+        assert_eq!(extra_len, 28);
+        let extra_start = 46 + name_len;
+        let extra = &data[extra_start..extra_start + extra_len];
+        assert_eq!(read_u16(extra, 0), 0x0001);
+        assert_eq!(read_u16(extra, 2), 24);
+        assert_eq!(read_u64(extra, 4), 10_000_000_000);
+        assert_eq!(read_u64(extra, 12), 5_000_000_000);
+        assert_eq!(read_u64(extra, 20), 0);
+    }
+
+    #[test]
+    fn test_cd_zip64_with_extra_field() {
+        let mut timestamp_extra = Vec::new();
+        ExtendedTimestampExtra::new(1700000000).serialize(&mut timestamp_extra);
+        let cde = CentralDirEntry {
+            version_made_by: VERSION_UNIX,
+            version_needed: VERSION_DEFLATE,
+            flags: FLAG_DATA_DESC,
+            method: METHOD_DEFLATE,
+            time: 0,
+            date: 0,
+            crc32: 0x12345678,
+            compressed_size: 5_000_000_000,
+            uncompressed_size: 10_000_000_000,
+            name: b"big_with_ts.bin".to_vec(),
+            extra: timestamp_extra.clone(),
+            local_header_offset: 0,
+            external_file_attributes: 0,
+            comment: None,
+        };
+        let data = cde.serialize().unwrap();
+
+        assert_eq!(read_u32(&data, 20), u32::MAX);
+        assert_eq!(read_u32(&data, 24), u32::MAX);
+
+        let name_len = read_u16(&data, 28) as usize;
+        let extra_len = read_u16(&data, 30) as usize;
+        assert_eq!(extra_len, 37);
+
+        let extra_start = 46 + name_len;
+        let extra_data = &data[extra_start..extra_start + extra_len];
+        assert_eq!(&extra_data[0..2], b"UT");
+        assert_eq!(read_u16(extra_data, 9), 0x0001);
+        assert_eq!(read_u16(extra_data, 11), 24);
+    }
+
+    #[test]
+    fn test_cd_field_too_long() {
+        let cde = CentralDirEntry {
+            version_made_by: VERSION_DEFLATE,
+            version_needed: VERSION_DEFLATE,
+            flags: FLAG_DATA_DESC,
+            method: METHOD_STORED,
+            time: 0,
+            date: 0,
+            crc32: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            name: "a".repeat(65536).into_bytes(),
+            extra: Vec::new(),
+            local_header_offset: 0,
+            external_file_attributes: 0,
+            comment: None,
+        };
+        let result = cde.serialize();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("filename too long")
+        );
+    }
+}

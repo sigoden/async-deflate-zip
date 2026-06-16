@@ -22,3 +22,5 @@ flate2 = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt"] }
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }

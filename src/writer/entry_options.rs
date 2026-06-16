@@ -8,9 +8,9 @@ use tokio::fs;
 
 /// Per-entry options for appending to a ZIP archive.
 ///
-/// Passed to [`ZipWriter::append_file`](crate::writer::ZipWriter::append_file),
-/// [`ZipWriter::append_directory`](crate::writer::ZipWriter::append_directory),
-/// and [`ZipWriter::append_symlink`](crate::writer::ZipWriter::append_symlink)
+/// Passed to [`ZipWriter::start_file`](crate::writer::ZipWriter::start_file),
+/// [`ZipWriter::add_directory`](crate::writer::ZipWriter::add_directory),
+/// and [`ZipWriter::add_symlink`](crate::writer::ZipWriter::add_symlink)
 /// to control metadata such as
 /// modification time, Unix permissions, UID/GID, and file comment.
 ///
@@ -20,33 +20,21 @@ use tokio::fs;
 /// - [`symlink`](EntryOptions::symlink) — 0777 + current time
 /// - [`from_path`](EntryOptions::from_path) — read metadata from a real file
 ///
-/// For full control, construct the struct directly:
+/// For full control, use the builder methods on a convenience constructor:
 ///
 /// ```rust,no_run
 /// use async_deflate_zip::EntryOptions;
 /// use std::time::SystemTime;
 ///
-/// let opts = EntryOptions {
-///     mtime: SystemTime::UNIX_EPOCH,
-///     permissions: Some(0o755),
-///     uid_gid: Some((1000, 1000)),
-///     comment: Some("my file".to_string()),
-/// };
+/// let opts = EntryOptions::default()
+///     .with_unix_permissions(0o644)
+///     .with_comment("my file");
 /// ```
 pub struct EntryOptions {
-    /// Last modification time. Stored in MS-DOS format in the fixed CD fields
-    /// and as a Unix timestamp in the extended timestamp extra field (0x5455).
-    pub mtime: SystemTime,
-    /// Unix permission bits (e.g. `0o644`, `0o755`). The file type bit
-    /// (`S_IFREG`/`S_IFDIR`/`S_IFLNK`) is added automatically by the writer.
-    /// When `None`, no Unix permissions are written.
-    pub permissions: Option<u32>,
-    /// Unix user and group IDs. Stored in the 0x7875 (Ux) extra field.
-    pub uid_gid: Option<(u32, u32)>,
-    /// Per-entry comment stored in the Central Directory.
-    /// Maximum length is 65535 bytes. Comments longer than this will
-    /// cause `finalize` to return [`ZipError::FieldTooLong`](crate::error::ZipError::FieldTooLong).
-    pub comment: Option<String>,
+    mtime: SystemTime,
+    permissions: Option<u32>,
+    uid_gid: Option<(u32, u32)>,
+    comment: Option<String>,
 }
 
 impl Default for EntryOptions {
@@ -61,7 +49,6 @@ impl Default for EntryOptions {
 }
 
 impl EntryOptions {
-    /// Read metadata (mtime, permissions, uid/gid) from a real filesystem path.
     ///
     /// The file's content is **not** read — only `symlink_metadata` is queried
     /// so this works on symlinks, directories, and regular files alike.
@@ -95,7 +82,6 @@ impl EntryOptions {
     /// modification time set to now.
     pub fn file() -> Self {
         Self {
-            mtime: SystemTime::now(),
             permissions: Some(0o644),
             ..Default::default()
         }
@@ -105,7 +91,6 @@ impl EntryOptions {
     /// modification time set to now.
     pub fn directory() -> Self {
         Self {
-            mtime: SystemTime::now(),
             permissions: Some(0o755),
             ..Default::default()
         }
@@ -115,9 +100,63 @@ impl EntryOptions {
     /// modification time set to now.
     pub fn symlink() -> Self {
         Self {
-            mtime: SystemTime::now(),
             permissions: Some(0o777),
             ..Default::default()
         }
+    }
+
+    // --- Builder methods -------------------------------------------------
+
+    /// Set the modification time.
+    pub fn with_mtime(mut self, mtime: SystemTime) -> Self {
+        self.mtime = mtime;
+        self
+    }
+
+    /// Set the Unix permission bits.
+    ///
+    /// The file type bit (`S_IFREG`/`S_IFDIR`/`S_IFLNK`) is added
+    /// automatically by the writer.
+    pub fn with_unix_permissions(mut self, permissions: u32) -> Self {
+        self.permissions = Some(permissions);
+        self
+    }
+
+    /// Set the Unix user and group IDs.
+    pub fn with_uid_gid(mut self, uid: u32, gid: u32) -> Self {
+        self.uid_gid = Some((uid, gid));
+        self
+    }
+
+    /// Set the per-entry comment.
+    ///
+    /// Maximum length is 65535 bytes when encoded as UTF-8. Comments
+    /// longer than this will cause [`crate::writer::ZipWriter::finish`] to return
+    /// [`crate::error::ZipError::FieldTooLong`].
+    pub fn with_comment(mut self, comment: &str) -> Self {
+        self.comment = Some(comment.to_string());
+        self
+    }
+
+    // --- Getters ----------------------------------------------------------
+
+    /// Last modification time.
+    pub fn mtime(&self) -> &SystemTime {
+        &self.mtime
+    }
+
+    /// Unix permission bits, if set.
+    pub fn unix_permissions(&self) -> Option<u32> {
+        self.permissions
+    }
+
+    /// Unix user and group IDs, if set.
+    pub fn uid_gid(&self) -> Option<(u32, u32)> {
+        self.uid_gid
+    }
+
+    /// Per-entry comment, if set.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 }

@@ -19,12 +19,11 @@ pub enum ZipError {
         max: usize,
     },
 
-    /// The archive is in an inconsistent state because a previous entry
-    /// was dropped without being properly closed.
-    Poisoned(String),
+    /// The writer is in a corrupted state (e.g. entry dropped without finish).
+    EntryWriterCorrupted,
 
-    /// The archive writer is in a state that does not allow the requested operation.
-    InvalidState(String),
+    /// An entry writer is already active; finish it before starting another.
+    WriterCorrupted,
 }
 
 impl fmt::Display for ZipError {
@@ -34,8 +33,8 @@ impl fmt::Display for ZipError {
             Self::FieldTooLong { field, len, max } => {
                 write!(f, "{field} too long: {len} bytes (max {max})")
             }
-            Self::Poisoned(msg) => write!(f, "archive corrupted: {msg}"),
-            Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
+            Self::EntryWriterCorrupted => write!(f, "entry writer corrupted"),
+            Self::WriterCorrupted => write!(f, "writer corrupted"),
         }
     }
 }
@@ -55,15 +54,13 @@ impl From<io::Error> for ZipError {
     }
 }
 
-// Allow seamless conversion back to io::Error for backward compatibility
-// or for use in contexts that require io::Result.
 impl From<ZipError> for io::Error {
     fn from(err: ZipError) -> Self {
         match err {
             ZipError::Io(e) => e,
             ZipError::FieldTooLong { .. } => io::Error::new(io::ErrorKind::InvalidInput, err),
-            ZipError::Poisoned(_) => io::Error::other(err),
-            ZipError::InvalidState(_) => io::Error::new(io::ErrorKind::InvalidInput, err),
+            ZipError::EntryWriterCorrupted => io::Error::other(err),
+            ZipError::WriterCorrupted => io::Error::other(err),
         }
     }
 }

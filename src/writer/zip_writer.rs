@@ -10,6 +10,7 @@ use crate::zip_format;
 
 use crate::CompressionLevel;
 
+use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 /// A streaming ZIP archive writer with per-file deflate compression.
@@ -222,6 +223,35 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             .await
             .map_err(ZipError::Io)?;
         entry.finish().await
+    }
+
+    /// Read a file from the filesystem and add it to the archive.
+    ///
+    /// Opens `path` with [`tokio::fs::File`] and derives [`EntryOptions`]
+    /// from the file's metadata via [`EntryOptions::from_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZipError`] if the file cannot be opened, if metadata cannot
+    /// be read, or if writing to the archive fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use async_deflate_zip::ZipWriter;
+    /// use std::path::Path;
+    ///
+    /// # async fn example() {
+    /// let mut buf = Vec::new();
+    /// let mut zip = ZipWriter::new(&mut buf);
+    /// zip.add_file("readme.txt", Path::new("README.md")).await.unwrap();
+    /// let _inner = zip.finish().await.unwrap();
+    /// # }
+    /// ```
+    pub async fn add_file(&mut self, name: &str, path: &Path) -> Result<(), ZipError> {
+        let options = EntryOptions::from_path(path).await.map_err(ZipError::Io)?;
+        let file = tokio::fs::File::open(path).await.map_err(ZipError::Io)?;
+        self.add_reader(name, file, &options).await
     }
 
     /// Start a new directory entry.

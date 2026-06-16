@@ -10,6 +10,3 @@ pub(crate) use extra_fields::*;
 pub(crate) use headers::*;
 pub(crate) use path::*;
 pub(crate) use time::*;
-
-#[cfg(test)]
-mod tests;

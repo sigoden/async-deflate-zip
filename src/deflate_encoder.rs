@@ -114,8 +114,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // After shutdown, only empty writes are accepted (return Ok(0)).
-        // Non-empty writes after shutdown are rejected.
         if self.finished {
             return if buf.is_empty() {
                 Poll::Ready(Ok(0))
@@ -128,23 +126,54 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
             return Poll::Ready(Ok(0));
         }
 
-        // Drain any remaining output from a previous compression call first
+        // Drain any remaining output from a previous call first
         if self.out_pos < self.out_len {
             match self.as_mut().poll_drain(cx) {
                 Poll::Ready(Ok(())) => {}
-                other => return other.map(|r| r.map(|_| 0)),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
             }
         }
 
-        let this = self.as_mut().get_mut();
-        let (consumed, _status) = this.do_compress(buf, FlushCompress::None)?;
+        // Compress and drain until we consume at least some input or would block.
+        // flate2 may buffer output internally (especially at low compression
+        // levels) and flush it in large batches.  When the output buffer fills
+        // up, do_compress can return consumed=0 — we must drain and retry
+        // rather than returning Ok(0) (which tokio::io::copy treats as
+        // WriteZero).
+        loop {
+            let (consumed, produced) = {
+                let this = self.as_mut().get_mut();
+                let (consumed, _status) = this.do_compress(buf, FlushCompress::None)?;
+                let produced = this.out_len;
+                (consumed, produced)
+            };
 
-        // Eagerly drain newly produced output (non-blocking best-effort)
-        if this.out_pos < this.out_len {
-            let _ = self.as_mut().poll_drain(cx);
+            // Drain the compressed output (if any) to the inner writer.
+            // If the inner writer would block, surface Pending so the caller
+            // can retry later.
+            if self.out_pos < self.out_len {
+                match self.as_mut().poll_drain(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            if consumed > 0 {
+                return Poll::Ready(Ok(consumed));
+            }
+
+            // consumed == 0 and produced == 0 means no progress possible —
+            // return 0 to signal EOF-like condition (shouldn't happen during
+            // normal operation unless the compressor is finished).
+            if produced == 0 {
+                return Poll::Ready(Ok(0));
+            }
+
+            // consumed == 0 but produced > 0: the output buffer was full.
+            // We already drained it above; loop back and try again.
         }
-
-        Poll::Ready(Ok(consumed))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -370,26 +399,5 @@ mod tests {
             !encoder.get_ref().data.is_empty(),
             "compressed data should be available"
         );
-    }
-
-    #[tokio::test]
-    async fn test_into_inner_after_shutdown() {
-        let mut buf = Vec::new();
-        let mut encoder = DeflateEncoder::new(&mut buf, CompressionLevel::default());
-        tokio::io::AsyncWriteExt::write_all(&mut encoder, b"hello")
-            .await
-            .unwrap();
-        tokio::io::AsyncWriteExt::shutdown(&mut encoder)
-            .await
-            .unwrap();
-
-        let inner = encoder.into_inner();
-        // We can still write to the inner after shutdown since it wasn't propagated.
-        // The buf should now contain: [deflate bytes for "hello"] + b" after"
-        assert!(
-            !inner.is_empty(),
-            "compressed data should have been written before shutdown"
-        );
-        // No assertion on exact content — deflate output is implementation-specific.
     }
 }

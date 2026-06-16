@@ -85,3 +85,72 @@ impl Zip64EocdrLocator {
         buf
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::zip_format::binary::*;
+    use crate::zip_format::*;
+
+    #[test]
+    fn test_eocd_normal_case() {
+        let eocdr = Eocdr {
+            total_entries: 10,
+            cd_size: 5000,
+            cd_offset: 10000,
+            comment: None,
+        };
+        let data = eocdr.serialize();
+        assert_eq!(read_u32(&data, 0), EOCDR_SIG);
+        assert_eq!(read_u16(&data, 8), 10);
+        assert_eq!(read_u16(&data, 10), 10);
+        assert_eq!(read_u32(&data, 12), 5000);
+        assert_eq!(read_u32(&data, 16), 10000);
+    }
+
+    #[test]
+    fn test_eocd_zip64_indicator() {
+        let eocdr = Eocdr {
+            total_entries: 70000,
+            cd_size: 5_000_000_000,
+            cd_offset: 6_000_000_000,
+            comment: None,
+        };
+        let data = eocdr.serialize();
+        assert_eq!(read_u16(&data, 8), 0xFFFF);
+        assert_eq!(read_u16(&data, 10), 0xFFFF);
+        assert_eq!(read_u32(&data, 12), u32::MAX);
+        assert_eq!(read_u32(&data, 16), u32::MAX);
+    }
+
+    #[test]
+    fn test_eocd_zip64_eocdr() {
+        let z64 = Zip64Eocdr {
+            total_entries: 70000,
+            cd_size: 5_000_000_000,
+            cd_offset: 6_000_000_000,
+        };
+        let data = z64.serialize();
+        assert_eq!(data.len(), 56);
+        assert_eq!(read_u32(&data, 0), EOCDR64_SIG);
+        assert_eq!(read_u64(&data, 4), 44);
+        assert_eq!(read_u16(&data, 12), VERSION_ZIP64);
+        assert_eq!(read_u16(&data, 14), VERSION_ZIP64);
+        assert_eq!(read_u64(&data, 24), 70000);
+        assert_eq!(read_u64(&data, 32), 70000);
+        assert_eq!(read_u64(&data, 40), 5_000_000_000);
+        assert_eq!(read_u64(&data, 48), 6_000_000_000);
+    }
+
+    #[test]
+    fn test_eocd_zip64_locator() {
+        let loc = Zip64EocdrLocator {
+            eocdr64_offset: 6_000_000_000,
+        };
+        let data = loc.serialize();
+        assert_eq!(data.len(), 20);
+        assert_eq!(read_u32(&data, 0), EOCDR64L_SIG);
+        assert_eq!(read_u32(&data, 4), 0);
+        assert_eq!(read_u64(&data, 8), 6_000_000_000);
+        assert_eq!(read_u32(&data, 16), 1);
+    }
+}

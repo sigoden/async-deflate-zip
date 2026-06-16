@@ -6,6 +6,7 @@ use crate::zip_format::sanitize_path;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
+use crate::validate::{validate_comment, validate_input};
 use crate::zip_format;
 
 use crate::CompressionLevel;
@@ -29,7 +30,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 /// let mut buf = Vec::new();
 /// let mut zip = ZipWriter::new(&mut buf);
 ///
-/// let mut entry = zip.start_file("hello.txt", EntryOptions::file()).await.unwrap();
+/// let mut entry = zip.start_file("hello.txt", &EntryOptions::file()).await.unwrap();
 /// entry.write_all(b"Hello, World!").await.unwrap();
 /// entry.finish().await.unwrap();
 ///
@@ -128,7 +129,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// let mut entry = zip.start_file("readme.txt", EntryOptions::file()).await.unwrap();
+    /// let mut entry = zip.start_file("readme.txt", &EntryOptions::file()).await.unwrap();
     /// entry.write_all(b"content").await.unwrap();
     /// entry.finish().await.unwrap();
     /// let _inner = zip.finish().await.unwrap();
@@ -137,10 +138,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     pub async fn start_file<'a>(
         &'a mut self,
         name: &str,
-        options: EntryOptions,
+        options: &EntryOptions,
     ) -> Result<EntryWriter<'a, W>, ZipError> {
-        let mut inner = self.take_inner()?;
         let name = sanitize_path(name);
+        validate_input(&name, options.comment())?;
+
+        let mut inner = self.take_inner()?;
 
         let is_stored = self.level.level() == 0;
         let method = if is_stored {
@@ -176,18 +179,18 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             crc_hasher: crc32fast::Hasher::new(),
             uncompressed_size: 0,
             local_header_offset: offset,
-            name: name.to_string(),
+            name: name.into_owned(),
             mtime: *options.mtime(),
             unix_permissions: options.unix_permissions(),
             uid_gid: options.uid_gid(),
-            comment: options.comment().map(|s| s.as_bytes().to_vec()),
+            comment: options.comment().map(|c| c.to_vec()),
         })
     }
 
     /// Stream data from an [`AsyncRead`] into a new file entry.
     ///
     /// Reads from `reader` until EOF, writing all data into the entry, then
-    /// finishs it.
+    /// finishes it.
     ///
     /// # Errors
     ///
@@ -204,7 +207,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
     /// let data: &[u8] = b"streamed data";
-    /// zip.add_reader("stream.txt", data, EntryOptions::file()).await.unwrap();
+    /// zip.add_reader("stream.txt", data, &EntryOptions::file()).await.unwrap();
     /// let _inner = zip.finish().await.unwrap();
     /// # }
     /// ```
@@ -212,7 +215,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         &mut self,
         path: &str,
         mut reader: R,
-        options: EntryOptions,
+        options: &EntryOptions,
     ) -> Result<(), ZipError>
     where
         R: AsyncRead + Unpin,
@@ -241,20 +244,22 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// zip.add_directory("mydir/", EntryOptions::directory()).await.unwrap();
+    /// zip.add_directory("mydir/", &EntryOptions::directory()).await.unwrap();
     /// let _inner = zip.finish().await.unwrap();
     /// # }
     /// ```
     pub async fn add_directory(
         &mut self,
         name: &str,
-        options: EntryOptions,
+        options: &EntryOptions,
     ) -> Result<(), ZipError> {
-        let mut inner = self.take_inner()?;
-        let mut name = sanitize_path(name);
+        let mut name = sanitize_path(name).into_owned();
         if !name.ends_with('/') {
             name.push('/');
         }
+        validate_input(&name, options.comment())?;
+
+        let mut inner = self.take_inner()?;
 
         let needs_zip64 = self.pos > zip_format::U32_MAX;
         let lfh = zip_format::LocalFileHeader::new(
@@ -281,7 +286,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         })?;
         self.pos += dd_bytes.len() as u64;
 
-        let (mtime_msdos, unix_mtime) = zip_format::mtime_to_ms_dos_and_unix(*options.mtime());
+        let unix_mtime = zip_format::system_time_to_unix_secs(*options.mtime());
 
         self.entries.push(StoredEntry {
             name: name.to_string(),
@@ -292,11 +297,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             is_directory: true,
             is_symlink: false,
             is_stored: true,
-            mtime: mtime_msdos,
             unix_mtime,
             unix_permissions: options.unix_permissions(),
             uid_gid: options.uid_gid(),
-            comment: options.comment().map(|s| s.as_bytes().to_vec()),
+            comment: options.comment().map(|c| c.to_vec()),
         });
 
         self.inner = Some(inner);
@@ -325,19 +329,21 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # async fn example() {
     /// let mut buf = Vec::new();
     /// let mut zip = ZipWriter::new(&mut buf);
-    /// zip.add_symlink("link.txt", "target.txt", EntryOptions::symlink()).await.unwrap();
+    /// zip.add_symlink("link.txt", "target.txt", &EntryOptions::symlink()).await.unwrap();
     /// let _inner = zip.finish().await.unwrap();
     /// # }
     /// ```
     pub async fn add_symlink(
         &mut self,
-        path: &str,
+        name: &str,
         target: &str,
-        options: EntryOptions,
+        options: &EntryOptions,
     ) -> Result<(), ZipError> {
-        let name = sanitize_path(path);
-        let target = sanitize_path(target);
+        let name = sanitize_path(name).into_owned();
+        validate_input(&name, options.comment())?;
+
         let mut inner = self.take_inner()?;
+
         let needs_zip64 = self.pos > zip_format::U32_MAX;
         let lfh = zip_format::LocalFileHeader::new(
             &name,
@@ -374,10 +380,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         })?;
         self.pos += dd_bytes.len() as u64;
 
-        let (mtime_msdos, unix_mtime) = zip_format::mtime_to_ms_dos_and_unix(*options.mtime());
+        let unix_mtime = zip_format::system_time_to_unix_secs(*options.mtime());
 
         self.entries.push(StoredEntry {
-            name: name.to_string(),
+            name,
             crc32,
             compressed_size: data_size,
             uncompressed_size: data_size,
@@ -385,11 +391,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             is_directory: false,
             is_symlink: true,
             is_stored: true,
-            mtime: mtime_msdos,
             unix_mtime,
             unix_permissions: options.unix_permissions(),
             uid_gid: options.uid_gid(),
-            comment: options.comment().map(|s| s.as_bytes().to_vec()),
+            comment: options.comment().map(|c| c.to_vec()),
         });
         self.inner = Some(inner);
         Ok(())
@@ -442,6 +447,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             self.pos += 20;
         }
 
+        if let Some(ref comment) = self.comment {
+            validate_comment(comment)?;
+        }
         let eocdr = zip_format::Eocdr {
             total_entries,
             cd_size,
@@ -460,12 +468,18 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// error occurs during entry writing. The ZIP output will be
     /// incomplete and should be discarded.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if an [`EntryWriter`] is still active (not yet finished),
-    /// because the inner writer has been moved into that entry.
-    pub fn abort(self) -> W {
-        self.inner.expect("entry writer still active")
+    /// Returns [`ZipError::WriterCorrupted`] if an [`EntryWriter`] is still
+    /// active (the inner writer has been moved into that entry), or
+    /// [`ZipError::EntryWriterCorrupted`] if the writer is in a poisoned
+    /// state (an entry was dropped without finishing).
+    pub fn abort(self) -> Result<W, ZipError> {
+        self.inner.ok_or(if self.poisoned {
+            ZipError::EntryWriterCorrupted
+        } else {
+            ZipError::WriterCorrupted
+        })
     }
 }
 
@@ -473,6 +487,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 mod tests {
     use super::*;
     use crate::CompressionLevel;
+    use crate::test_utils::*;
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
@@ -480,17 +495,16 @@ mod tests {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
-            .start_file("hello.txt", EntryOptions::file())
+            .start_file("hello.txt", &EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(b"Hello, World!").await.unwrap();
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        assert!(buf.len() > 30);
-        assert!(buf.windows(4).any(|w| w == b"PK\x03\x04"));
-        assert!(buf.windows(4).any(|w| w == b"PK\x01\x02"));
-        assert!(buf.windows(4).any(|w| w == b"PK\x05\x06"));
+        assert_has_pk_signatures(&buf);
+        assert_entry_count(&buf, 1);
+        assert_entry_content(&buf, "hello.txt", b"Hello, World!");
     }
 
     #[tokio::test]
@@ -498,17 +512,24 @@ mod tests {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
 
-        let mut entry = zip.start_file("a.txt", EntryOptions::file()).await.unwrap();
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
         entry.write_all(b"aaa").await.unwrap();
         entry.finish().await.unwrap();
 
-        let mut entry = zip.start_file("b.txt", EntryOptions::file()).await.unwrap();
+        let mut entry = zip
+            .start_file("b.txt", &EntryOptions::file())
+            .await
+            .unwrap();
         entry.write_all(b"bbb").await.unwrap();
         entry.finish().await.unwrap();
 
         zip.finish().await.unwrap();
-        let cd_count = buf.windows(4).filter(|w| w == b"PK\x01\x02").count();
-        assert_eq!(cd_count, 2);
+        assert_entry_count(&buf, 2);
+        assert_entry_content(&buf, "a.txt", b"aaa");
+        assert_entry_content(&buf, "b.txt", b"bbb");
     }
 
     #[tokio::test]
@@ -518,58 +539,27 @@ mod tests {
 
         let data = vec![b'A'; 1024];
         let mut entry = zip
-            .start_file("repeated.txt", EntryOptions::file())
+            .start_file("repeated.txt", &EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(&data).await.unwrap();
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        let cd_pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let compressed_size = u32::from_le_bytes(buf[cd_pos + 20..cd_pos + 24].try_into().unwrap());
-        let uncompressed_size =
-            u32::from_le_bytes(buf[cd_pos + 24..cd_pos + 28].try_into().unwrap());
-        assert!(
-            compressed_size < uncompressed_size,
-            "compressed {compressed_size} >= uncompressed {uncompressed_size}"
-        );
+        assert_compressed_smaller(&buf, "repeated.txt");
     }
 
     #[tokio::test]
     async fn test_symlink_entry() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
-        zip.add_symlink("link.txt", "target.txt", EntryOptions::symlink())
+        zip.add_symlink("link.txt", "target.txt", &EntryOptions::symlink())
             .await
             .unwrap();
         zip.finish().await.unwrap();
 
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-
-        let vmb = u16::from_le_bytes(cd[4..6].try_into().unwrap());
-        assert_eq!(vmb >> 8, 3, "expected Unix host OS for symlink");
-
-        let version_needed = u16::from_le_bytes(cd[6..8].try_into().unwrap());
-        assert_eq!(version_needed, 10, "expected VERSION_STORED for symlink");
-
-        let method = u16::from_le_bytes(cd[10..12].try_into().unwrap());
-        assert_eq!(method, 0, "expected METHOD_STORED for symlink");
-
-        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
-        assert!(
-            (efa >> 16) & 0o170000 == 0o120000,
-            "expected S_IFLNK in external_file_attributes, got {:06o}",
-            efa >> 16
-        );
-
-        let lfh_pos = buf.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
-        let lfh = &buf[lfh_pos..];
-        let lfh_name_len = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as usize;
-        let lfh_extra_len = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as usize;
-        let lfh_total = 30 + lfh_name_len + lfh_extra_len;
-        let data = &buf[lfh_pos + lfh_total..lfh_pos + lfh_total + 10];
-        assert_eq!(data, b"target.txt", "symlink target mismatch");
+        assert_entry_compression(&buf, "link.txt", zip::CompressionMethod::Stored);
+        assert_entry_content(&buf, "link.txt", b"target.txt");
     }
 
     #[tokio::test]
@@ -580,12 +570,14 @@ mod tests {
 
         for i in 0..=num_entries {
             let name = format!("f{i}");
-            let mut entry = zip.start_file(&name, EntryOptions::file()).await.unwrap();
+            let mut entry = zip.start_file(&name, &EntryOptions::file()).await.unwrap();
             entry.write_all(b"x").await.unwrap();
             entry.finish().await.unwrap();
         }
 
         zip.finish().await.unwrap();
+
+        assert_entry_count(&buf, num_entries as usize + 1);
 
         let eocdr_pos = buf.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
         let eocdr_end = &buf[eocdr_pos..];
@@ -606,19 +598,9 @@ mod tests {
             "expected Zip64Eocdr < Zip64EocdrLocator < Eocdr, got {z64_pos} < {locator_pos} < {eocdr_pos}"
         );
 
-        let cd_count = buf.windows(4).filter(|w| w == b"PK\x01\x02").count();
-        assert_eq!(cd_count, num_entries as usize + 1);
-
-        // LFH (30 + 2 name + 9 extra = 41) + 1 byte data + 16 DD = 58
-        assert_eq!(
-            &buf[42..46],
-            b"PK\x07\x08",
+        assert!(
+            buf.windows(4).any(|w| w == b"PK\x07\x08"),
             "first entry should have DD signature"
-        );
-        assert_eq!(
-            &buf[58..62],
-            b"PK\x03\x04",
-            "next LFH at offset 58 confirms 16-byte DD (non-ZIP64) for small-entry ZIP64 archive"
         );
     }
 
@@ -629,137 +611,72 @@ mod tests {
 
         let data = b"Hello, stored entry!";
         let mut entry = zip
-            .start_file("stored.txt", EntryOptions::file())
+            .start_file("stored.txt", &EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(data).await.unwrap();
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-        let method = u16::from_le_bytes(cd[10..12].try_into().unwrap());
-        assert_eq!(method, 0, "expected METHOD_STORED for level=0 entry");
-        let version_needed = u16::from_le_bytes(cd[6..8].try_into().unwrap());
-        assert_eq!(
-            version_needed, 10,
-            "expected VERSION_STORED for level=0 entry"
-        );
-
-        let compressed_size = u32::from_le_bytes(cd[20..24].try_into().unwrap()) as u64;
-        let uncompressed_size = u32::from_le_bytes(cd[24..28].try_into().unwrap()) as u64;
-        assert_eq!(
-            compressed_size, uncompressed_size,
-            "stored entry should have equal compressed and uncompressed sizes"
-        );
-        assert_eq!(compressed_size, data.len() as u64);
-
-        let lfh_pos = buf.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
-        let lfh_method = u16::from_le_bytes(buf[lfh_pos + 8..lfh_pos + 10].try_into().unwrap());
-        assert_eq!(lfh_method, 0, "LFH method should be STORED for level=0");
+        assert_entry_compression(&buf, "stored.txt", zip::CompressionMethod::Stored);
+        assert_entry_sizes_match(&buf, "stored.txt");
+        assert_entry_content(&buf, "stored.txt", data);
     }
 
     #[tokio::test]
     async fn test_directory_entry() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
-        zip.add_directory("mydir/", EntryOptions::directory())
+        zip.add_directory("mydir/", &EntryOptions::directory())
             .await
             .unwrap();
         zip.finish().await.unwrap();
 
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-
-        let version_needed = u16::from_le_bytes(cd[6..8].try_into().unwrap());
-        assert_eq!(version_needed, 10, "expected VERSION_STORED for directory");
-
-        let method = u16::from_le_bytes(cd[10..12].try_into().unwrap());
-        assert_eq!(method, 0, "expected METHOD_STORED for directory");
-
-        let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
-        assert!(
-            (efa >> 16) & 0o170000 == 0o040000,
-            "expected S_IFDIR in external_file_attributes, got {:06o}",
-            efa >> 16
-        );
-        assert_eq!(
-            (efa >> 16) & 0o7777,
-            0o755,
-            "expected directory permissions 0o755, got {:06o}",
-            (efa >> 16) & 0o7777
-        );
-
-        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
-        let extra_start = 46 + name_len;
-        let extra = &cd[extra_start..extra_start + extra_len];
-        assert!(
-            extra.windows(2).any(|w| w == b"UT"),
-            "CD extra should contain UT (0x5455) tag for directory with mtime"
-        );
+        assert_entry_compression(&buf, "mydir/", zip::CompressionMethod::Stored);
+        assert_unix_mode(&buf, "mydir/", 0o040755);
+        assert_extra_has_tag(&buf, "mydir/", b"UT");
     }
 
     #[tokio::test]
     async fn test_entry_comment() {
-        // File entry with comment
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
             .start_file(
                 "commented.txt",
-                EntryOptions::file().with_comment("file comment"),
+                &EntryOptions::file().with_comment("file comment"),
             )
             .await
             .unwrap();
         entry.write_all(b"data").await.unwrap();
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
-        assert_eq!(comment_len, 12);
-        let comment_start = 46 + name_len + extra_len;
-        let comment = &cd[comment_start..comment_start + comment_len];
-        assert_eq!(comment, b"file comment");
+        assert_entry_comment(&buf, "commented.txt", "file comment");
 
-        // Directory entry with comment
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         zip.add_directory(
             "dir/",
-            EntryOptions::directory().with_comment("dir comment"),
+            &EntryOptions::directory().with_comment("dir comment"),
         )
         .await
         .unwrap();
         zip.finish().await.unwrap();
-        let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-        let cd = &buf[pos..];
-        let name_len = u16::from_le_bytes(cd[28..30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[30..32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd[32..34].try_into().unwrap()) as usize;
-        assert_eq!(comment_len, 11);
-        let comment_start = 46 + name_len + extra_len;
-        let comment = &cd[comment_start..comment_start + comment_len];
-        assert_eq!(comment, b"dir comment");
+        assert_entry_comment(&buf, "dir/", "dir comment");
     }
 
     #[tokio::test]
     async fn test_archive_comment() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf).with_comment("archive comment");
-        let mut entry = zip.start_file("f.txt", EntryOptions::file()).await.unwrap();
+        let mut entry = zip
+            .start_file("f.txt", &EntryOptions::file())
+            .await
+            .unwrap();
         entry.write_all(b"data").await.unwrap();
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        let eocdr_pos = buf.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
-        let comment_len =
-            u16::from_le_bytes(buf[eocdr_pos + 20..eocdr_pos + 22].try_into().unwrap()) as usize;
-        assert_eq!(comment_len, 15, "expected 15-byte archive comment");
-        let comment = &buf[eocdr_pos + 22..eocdr_pos + 22 + comment_len];
-        assert_eq!(comment, b"archive comment");
+        assert_archive_comment(&buf, "archive comment");
     }
 }

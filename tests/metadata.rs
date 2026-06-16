@@ -11,7 +11,7 @@ async fn metadata_with_mtime() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, opts).await.unwrap();
+    zip.add_reader(name, content, &opts).await.unwrap();
     zip.finish().await.unwrap();
 
     common::verify::verify_zip(&zip_path, 1);
@@ -27,7 +27,7 @@ async fn metadata_with_unix_permissions() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, opts).await.unwrap();
+    zip.add_reader(name, content, &opts).await.unwrap();
     zip.finish().await.unwrap();
 
     common::verify::verify_zip(&zip_path, 1);
@@ -43,7 +43,7 @@ async fn metadata_with_uid_gid() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, opts).await.unwrap();
+    zip.add_reader(name, content, &opts).await.unwrap();
     zip.finish().await.unwrap();
 
     common::verify::verify_zip(&zip_path, 1);

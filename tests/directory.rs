@@ -9,31 +9,31 @@ async fn directory_basic() {
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
 
-    zip.add_directory("emptydir/", EntryOptions::directory())
+    zip.add_directory("emptydir/", &EntryOptions::directory())
         .await
         .unwrap();
 
     zip.add_directory(
         "dated_dir/",
-        EntryOptions::directory().with_mtime(std::time::SystemTime::UNIX_EPOCH),
+        &EntryOptions::directory().with_mtime(std::time::SystemTime::UNIX_EPOCH),
     )
     .await
     .unwrap();
 
-    zip.add_directory("protected_dir/", EntryOptions::directory())
+    zip.add_directory("protected_dir/", &EntryOptions::directory())
         .await
         .unwrap();
 
     zip.add_directory(
         "full_meta_dir/",
-        EntryOptions::directory().with_unix_permissions(0o700),
+        &EntryOptions::directory().with_unix_permissions(0o700),
     )
     .await
     .unwrap();
 
     let name = "emptydir/hello.txt";
     let content: &[u8] = b"nested";
-    zip.add_reader(name, content, EntryOptions::file())
+    zip.add_reader(name, content, &EntryOptions::file())
         .await
         .unwrap();
 

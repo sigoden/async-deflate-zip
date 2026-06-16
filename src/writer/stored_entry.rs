@@ -10,7 +10,6 @@ pub(crate) struct StoredEntry {
     pub(crate) is_directory: bool,
     pub(crate) is_symlink: bool,
     pub(crate) is_stored: bool,
-    pub(crate) mtime: (u16, u16),
     pub(crate) unix_mtime: u64,
     pub(crate) unix_permissions: Option<u32>,
     pub(crate) uid_gid: Option<(u32, u32)>,
@@ -19,7 +18,7 @@ pub(crate) struct StoredEntry {
 
 impl StoredEntry {
     pub(crate) fn to_central_dir_entry(&self) -> zip_format::CentralDirEntry {
-        let (time, date) = self.mtime;
+        let (time, date) = zip_format::unix_secs_to_ms_dos(self.unix_mtime);
 
         let has_unix_attrs =
             self.unix_permissions.is_some() || self.is_symlink || self.unix_mtime != 0;
@@ -108,7 +107,6 @@ mod tests {
             is_directory: false,
             is_symlink: false,
             is_stored: false,
-            mtime: (0, 0),
             unix_mtime: 0,
             unix_permissions: None,
             uid_gid: None,
@@ -212,7 +210,6 @@ mod tests {
             uncompressed_size: 50,
             local_header_offset: 42,
             is_stored: true,
-            mtime: (0x4A5B, 0x14AF),
             unix_mtime: 1234567890,
             unix_permissions: Some(0o644),
             uid_gid: Some((1000, 1000)),

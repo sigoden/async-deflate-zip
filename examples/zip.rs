@@ -99,16 +99,16 @@ async fn add_targets<W: AsyncWriteExt + Unpin>(
             .to_string_lossy()
             .into_owned();
         if target.is_dir() {
-            zip.add_directory(&target_name, entry_options).await?;
+            zip.add_directory(&target_name, &entry_options).await?;
             Box::pin(add_dir(zip, target, target, Some(&target_name))).await?;
         } else if target.is_file() {
-            let mut entry = zip.start_file(&target_name, entry_options).await?;
+            let mut entry = zip.start_file(&target_name, &entry_options).await?;
             let mut file = fs::File::open(target).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.finish().await?;
         } else if target.is_symlink() {
             let link_target = fs::read_link(target).await?;
-            zip.add_symlink(&target_name, &link_target.to_string_lossy(), entry_options)
+            zip.add_symlink(&target_name, &link_target.to_string_lossy(), &entry_options)
                 .await?;
         }
     }
@@ -135,17 +135,17 @@ async fn add_dir<W: AsyncWriteExt + Unpin>(
         let file_type = entry.file_type().await?;
         let entry_options = EntryOptions::from_path(&path).await?;
         if file_type.is_dir() {
-            zip.add_directory(&relative, entry_options).await?;
+            zip.add_directory(&relative, &entry_options).await?;
             Box::pin(add_dir(zip, base, &path, prefix)).await?;
         } else if file_type.is_file() {
-            let mut entry = zip.start_file(&relative, entry_options).await?;
+            let mut entry = zip.start_file(&relative, &entry_options).await?;
             let mut file = fs::File::open(&path).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.finish().await?;
         } else if file_type.is_symlink() {
             let link_target = fs::read_link(&path).await?;
             let target_str = extract_relative_path(base, &link_target);
-            zip.add_symlink(&relative, &target_str, entry_options)
+            zip.add_symlink(&relative, &target_str, &entry_options)
                 .await?;
         }
     }

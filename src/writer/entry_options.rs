@@ -34,7 +34,7 @@ pub struct EntryOptions {
     mtime: SystemTime,
     permissions: Option<u32>,
     uid_gid: Option<(u32, u32)>,
-    comment: Option<String>,
+    comment: Option<Vec<u8>>,
 }
 
 impl Default for EntryOptions {
@@ -131,10 +131,10 @@ impl EntryOptions {
     /// Set the per-entry comment.
     ///
     /// Maximum length is 65535 bytes when encoded as UTF-8. Comments
-    /// longer than this will cause [`crate::writer::ZipWriter::finish`] to return
-    /// [`crate::error::ZipError::FieldTooLong`].
+    /// longer than this will cause `start_file`, `add_directory`, or
+    /// `add_symlink` to return [`crate::error::ZipError::FieldTooLong`].
     pub fn with_comment(mut self, comment: &str) -> Self {
-        self.comment = Some(comment.to_string());
+        self.comment = Some(comment.as_bytes().to_vec());
         self
     }
 
@@ -155,8 +155,8 @@ impl EntryOptions {
         self.uid_gid
     }
 
-    /// Per-entry comment, if set.
-    pub fn comment(&self) -> Option<&str> {
+    /// Per-entry comment bytes, if set.
+    pub fn comment(&self) -> Option<&[u8]> {
         self.comment.as_deref()
     }
 }

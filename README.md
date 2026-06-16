@@ -10,47 +10,18 @@ Streaming async ZIP archive writer with per-file deflate compression.
 
 ```toml
 [dependencies]
-async-deflate-zip = "0.3.0"
+async-deflate-zip = "0.4.0"
 ```
 
 ```rust
 use async_deflate_zip::{ZipWriter, EntryOptions};
-use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-let file = File::create("tmp/output.zip").await?;
+let file = File::create("archive.zip").await?;
 let mut zip = ZipWriter::new(file);
 
-let mut entry = zip.start_file("hello.txt", EntryOptions::file()).await?;
+let mut entry = zip.start_file("hello.txt", &EntryOptions::file()).await?;
 entry.write_all(b"Hello, World!").await?;
-entry.finish().await?;
-
-let _writer = zip.finish().await?;
-```
-
-## Builder Pattern
-
-Configure the archive and entries with builder chains:
-
-```rust
-use async_deflate_zip::{CompressionLevel, EntryOptions, ZipWriter};
-use std::time::SystemTime;
-use tokio::io::AsyncWriteExt;
-
-let mut output = Vec::new();
-let mut zip = ZipWriter::new(&mut output)
-    .with_compression_level(CompressionLevel::best())
-    .with_comment("archive comment");
-
-let mut entry = zip.start_file(
-    "readme.txt",
-    EntryOptions::file()
-        .with_mtime(SystemTime::now())
-        .with_unix_permissions(0o644)
-        .with_comment("file comment"),
-)
-.await?;
-entry.write_all(b"content").await?;
 entry.finish().await?;
 
 zip.finish().await?;

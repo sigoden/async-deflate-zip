@@ -14,13 +14,16 @@ pub(crate) fn system_time_to_ms_dos(t: SystemTime) -> (u16, u16) {
     (time, date)
 }
 
-pub(crate) fn mtime_to_ms_dos_and_unix(mtime: SystemTime) -> ((u16, u16), u64) {
-    let (time, date) = system_time_to_ms_dos(mtime);
-    let secs = mtime
-        .duration_since(std::time::UNIX_EPOCH)
+pub(crate) fn system_time_to_unix_secs(t: SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    ((time, date), secs)
+        .as_secs()
+}
+
+pub(crate) fn unix_secs_to_ms_dos(secs: u64) -> (u16, u16) {
+    let duration = std::time::Duration::from_secs(secs);
+    let system_time = std::time::UNIX_EPOCH + duration;
+    system_time_to_ms_dos(system_time)
 }
 
 #[cfg(test)]

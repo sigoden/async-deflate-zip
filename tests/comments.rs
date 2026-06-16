@@ -11,7 +11,7 @@ async fn comments_entry_file() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    zip.add_reader(name, content, opts).await.unwrap();
+    zip.add_reader(name, content, &opts).await.unwrap();
     zip.finish().await.unwrap();
 
     common::verify::verify_zip(&zip_path, 1);
@@ -26,7 +26,7 @@ async fn comments_archive() {
 
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file).with_comment("async-deflate-zip archive");
-    zip.add_reader(name, content, EntryOptions::file())
+    zip.add_reader(name, content, &EntryOptions::file())
         .await
         .unwrap();
     zip.finish().await.unwrap();
@@ -43,7 +43,7 @@ async fn comments_directory() {
     let mut zip = ZipWriter::new(file);
     zip.add_directory(
         "mydir/",
-        EntryOptions::directory().with_comment("directory comment"),
+        &EntryOptions::directory().with_comment("directory comment"),
     )
     .await
     .unwrap();
@@ -61,7 +61,7 @@ async fn comments_symlink() {
     zip.add_symlink(
         "link.txt",
         "hello.txt",
-        EntryOptions::symlink().with_comment("symlink comment"),
+        &EntryOptions::symlink().with_comment("symlink comment"),
     )
     .await
     .unwrap();

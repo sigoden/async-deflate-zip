@@ -27,7 +27,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mut compression = CompressionLevel::default();
+    let mut compression_level = CompressionLevel::default();
     let mut output_path: Option<PathBuf> = None;
     let mut targets: Vec<PathBuf> = Vec::new();
 
@@ -40,7 +40,7 @@ async fn main() {
                     eprintln!("Error: Invalid compression level: {level} (valid range 0-9)");
                     std::process::exit(1);
                 }
-                compression = CompressionLevel::new(level as u32);
+                compression_level = CompressionLevel::new(level);
                 continue;
             }
             eprintln!("Error: unrecognized flag '{arg}'");
@@ -70,7 +70,7 @@ async fn main() {
     }
 
     let file = fs::File::create(&output_path).await.unwrap();
-    let mut zip = ZipWriter::new(file).with_compression_level(compression);
+    let mut zip = ZipWriter::new(file).with_compression_level(compression_level);
 
     if let Err(e) = add_targets(&mut zip, &targets).await {
         eprintln!("Error: {e}");

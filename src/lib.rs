@@ -29,6 +29,7 @@
 //! # }
 //! ```
 
+mod compression;
 mod count_writer;
 mod deflate_encoder;
 mod error;
@@ -39,8 +40,8 @@ mod zip_format;
 #[cfg(test)]
 mod test_utils;
 
+pub use compression::CompressionLevel;
 pub use error::ZipError;
-pub type CompressionLevel = flate2::Compression;
 pub use writer::EntryOptions;
 pub use writer::EntryWriter;
 pub use writer::ZipWriter;

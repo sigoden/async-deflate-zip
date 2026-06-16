@@ -35,7 +35,7 @@ pub(crate) struct DeflateEncoder<W: AsyncWrite + Unpin> {
 impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
     /// Create a new `DeflateEncoder` wrapping `inner` with the given compression level.
     pub(crate) fn new(inner: W, level: CompressionLevel) -> Self {
-        let initial_size = match level.level() {
+        let initial_size = match level.value() {
             0 => 32768,
             1..=2 => 16384,
             3..=6 => 8192,
@@ -44,7 +44,7 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
         Self {
             inner,
             // false = raw deflate (no zlib header/trailer)
-            compress: Compress::new(level, false),
+            compress: Compress::new(level.into(), false),
             out_buf: vec![0u8; initial_size],
             out_pos: 0,
             out_len: 0,

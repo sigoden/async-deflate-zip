@@ -1,7 +1,6 @@
 use super::entry_options::EntryOptions;
 use super::entry_writer::EntryWriter;
 use super::stored_entry::StoredEntry;
-use crate::count_writer::CountWriter;
 use crate::zip_format::sanitize_path;
 
 use crate::deflate_encoder::DeflateEncoder;
@@ -44,6 +43,7 @@ pub struct ZipWriter<W: AsyncWrite + Unpin> {
     pub(crate) pos: u64,
     pub(crate) poisoned: bool,
     comment: Option<Vec<u8>>,
+    pub(crate) scratch: Vec<u8>,
 }
 
 impl<W: AsyncWrite + Unpin> ZipWriter<W> {
@@ -58,6 +58,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             pos: 0,
             poisoned: false,
             comment: None,
+            scratch: Vec::new(),
         }
     }
 
@@ -154,21 +155,16 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let needs_zip64 = self.pos > zip_format::U32_MAX;
         let lfh = zip_format::LocalFileHeader::new(&name, method, needs_zip64, *options.mtime());
-        let lfh_bytes = lfh.serialize()?;
-        inner.write_all(&lfh_bytes).await?;
+        self.scratch.clear();
+        lfh.write_to(&mut self.scratch)?;
+        inner.write_all(&self.scratch).await?;
         let offset = self.pos;
-        self.pos += lfh_bytes.len() as u64;
+        self.pos += self.scratch.len() as u64;
 
         let (deflate_encoder, passthrough) = if is_stored {
-            (None, Some(CountWriter { inner, count: 0 }))
+            (None, Some(inner))
         } else {
-            (
-                Some(DeflateEncoder::new(
-                    CountWriter { inner, count: 0 },
-                    self.level,
-                )),
-                None,
-            )
+            (Some(DeflateEncoder::new(inner, self.level)), None)
         };
 
         Ok(EntryWriter {
@@ -178,6 +174,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             is_stored,
             crc_hasher: crc32fast::Hasher::new(),
             uncompressed_size: 0,
+            compressed_size: 0,
             local_header_offset: offset,
             name: name.into_owned(),
             mtime: *options.mtime(),
@@ -213,14 +210,14 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// ```
     pub async fn add_reader<R>(
         &mut self,
-        path: &str,
+        name: &str,
         mut reader: R,
         options: &EntryOptions,
     ) -> Result<(), ZipError>
     where
         R: AsyncRead + Unpin,
     {
-        let mut entry = self.start_file(path, options).await?;
+        let mut entry = self.start_file(name, options).await?;
         tokio::io::copy(&mut reader, &mut entry)
             .await
             .map_err(ZipError::Io)?;
@@ -268,10 +265,11 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             needs_zip64,
             *options.mtime(),
         );
-        let lfh_bytes = lfh.serialize()?;
-        inner.write_all(&lfh_bytes).await?;
+        self.scratch.clear();
+        lfh.write_to(&mut self.scratch)?;
+        inner.write_all(&self.scratch).await?;
         let offset = self.pos;
-        self.pos += lfh_bytes.len() as u64;
+        self.pos += self.scratch.len() as u64;
 
         let dd = zip_format::DataDescriptor {
             crc32: 0,
@@ -279,12 +277,13 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             uncompressed_size: 0,
             zip64: offset > zip_format::U32_MAX,
         };
-        let dd_bytes = dd.serialize();
-        inner.write_all(&dd_bytes).await.map_err(|e| {
+        self.scratch.clear();
+        dd.write_to(&mut self.scratch);
+        inner.write_all(&self.scratch).await.map_err(|e| {
             self.poisoned = true;
             ZipError::Io(e)
         })?;
-        self.pos += dd_bytes.len() as u64;
+        self.pos += self.scratch.len() as u64;
 
         let unix_mtime = zip_format::system_time_to_unix_secs(*options.mtime());
 
@@ -351,10 +350,11 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             needs_zip64,
             *options.mtime(),
         );
-        let lfh_bytes = lfh.serialize()?;
-        inner.write_all(&lfh_bytes).await?;
+        self.scratch.clear();
+        lfh.write_to(&mut self.scratch)?;
+        inner.write_all(&self.scratch).await?;
         let offset = self.pos;
-        self.pos += lfh_bytes.len() as u64;
+        self.pos += self.scratch.len() as u64;
 
         // Write the symlink target as stored (uncompressed) data
         let target_bytes = target.as_bytes();
@@ -371,14 +371,15 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             crc32,
             compressed_size: data_size,
             uncompressed_size: data_size,
-            zip64: data_size > zip_format::U32_MAX || offset > zip_format::U32_MAX,
+            zip64: zip_format::entry_needs_zip64(data_size, data_size, offset),
         };
-        let dd_bytes = dd.serialize();
-        inner.write_all(&dd_bytes).await.map_err(|e| {
+        self.scratch.clear();
+        dd.write_to(&mut self.scratch);
+        inner.write_all(&self.scratch).await.map_err(|e| {
             self.poisoned = true;
             ZipError::Io(e)
         })?;
-        self.pos += dd_bytes.len() as u64;
+        self.pos += self.scratch.len() as u64;
 
         let unix_mtime = zip_format::system_time_to_unix_secs(*options.mtime());
 
@@ -420,16 +421,15 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         for entry in &self.entries {
             let cd_entry = entry.to_central_dir_entry();
-            let data = cd_entry.serialize()?;
-            inner.write_all(&data).await?;
-            self.pos += data.len() as u64;
+            self.scratch.clear();
+            cd_entry.write_to(&mut self.scratch)?;
+            inner.write_all(&self.scratch).await?;
+            self.pos += self.scratch.len() as u64;
         }
 
         let cd_size = self.pos - cd_offset;
         let total_entries = self.entries.len() as u64;
-        let needs_zip64 = total_entries > 0xFFFF
-            || cd_size > zip_format::U32_MAX
-            || cd_offset > zip_format::U32_MAX;
+        let needs_zip64 = zip_format::archive_needs_zip64(total_entries, cd_size, cd_offset);
 
         if needs_zip64 {
             let eocdr64 = zip_format::Zip64Eocdr {
@@ -437,13 +437,16 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
                 cd_size,
                 cd_offset,
             };
-            let data = eocdr64.serialize();
             let eocdr64_offset = self.pos;
-            inner.write_all(&data).await?;
-            self.pos += data.len() as u64;
+            self.scratch.clear();
+            eocdr64.write_to(&mut self.scratch);
+            inner.write_all(&self.scratch).await?;
+            self.pos += self.scratch.len() as u64;
 
             let locator = zip_format::Zip64EocdrLocator { eocdr64_offset };
-            inner.write_all(&locator.serialize()).await?;
+            self.scratch.clear();
+            locator.write_to(&mut self.scratch);
+            inner.write_all(&self.scratch).await?;
             self.pos += 20;
         }
 
@@ -456,7 +459,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             cd_offset,
             comment: self.comment,
         };
-        inner.write_all(&eocdr.serialize()).await?;
+        self.scratch.clear();
+        eocdr.write_to(&mut self.scratch);
+        inner.write_all(&self.scratch).await?;
         inner.shutdown().await?;
         Ok(inner)
     }

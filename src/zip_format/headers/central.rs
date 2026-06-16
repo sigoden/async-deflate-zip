@@ -21,7 +21,7 @@ pub(crate) struct CentralDirEntry {
 }
 
 impl CentralDirEntry {
-    pub(crate) fn serialize(&self) -> Result<Vec<u8>, ZipError> {
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) -> Result<(), ZipError> {
         if self.name.len() > u16::MAX as usize {
             return Err(ZipError::FieldTooLong {
                 field: "CentralDirEntry filename",
@@ -30,9 +30,11 @@ impl CentralDirEntry {
             });
         }
 
-        let use_zip64 = self.compressed_size > U32_MAX
-            || self.uncompressed_size > U32_MAX
-            || self.local_header_offset > U32_MAX;
+        let use_zip64 = entry_needs_zip64(
+            self.compressed_size,
+            self.uncompressed_size,
+            self.local_header_offset,
+        );
 
         let extra = if use_zip64 {
             let mut extra = self.extra.clone();
@@ -63,24 +65,25 @@ impl CentralDirEntry {
             });
         }
 
-        let mut buf = Vec::with_capacity(46 + self.name.len() + extra.len() + comment.len());
-        put_u32(&mut buf, CD_SIG);
-        put_u16(&mut buf, self.version_made_by);
+        buf.clear();
+        buf.reserve(46 + self.name.len() + extra.len() + comment.len());
+        put_u32(buf, CD_SIG);
+        put_u16(buf, self.version_made_by);
         put_u16(
-            &mut buf,
+            buf,
             if use_zip64 {
                 VERSION_ZIP64
             } else {
                 self.version_needed
             },
         );
-        put_u16(&mut buf, self.flags);
-        put_u16(&mut buf, self.method);
-        put_u16(&mut buf, self.time);
-        put_u16(&mut buf, self.date);
-        put_u32(&mut buf, self.crc32);
+        put_u16(buf, self.flags);
+        put_u16(buf, self.method);
+        put_u16(buf, self.time);
+        put_u16(buf, self.date);
+        put_u32(buf, self.crc32);
         put_u32(
-            &mut buf,
+            buf,
             if use_zip64 {
                 u32::MAX
             } else {
@@ -88,21 +91,21 @@ impl CentralDirEntry {
             },
         );
         put_u32(
-            &mut buf,
+            buf,
             if use_zip64 {
                 u32::MAX
             } else {
                 self.uncompressed_size as u32
             },
         );
-        put_u16(&mut buf, self.name.len() as u16);
-        put_u16(&mut buf, extra.len() as u16);
-        put_u16(&mut buf, comment.len() as u16);
-        put_u16(&mut buf, 0);
-        put_u16(&mut buf, 0);
-        put_u32(&mut buf, self.external_file_attributes);
+        put_u16(buf, self.name.len() as u16);
+        put_u16(buf, extra.len() as u16);
+        put_u16(buf, comment.len() as u16);
+        put_u16(buf, 0);
+        put_u16(buf, 0);
+        put_u32(buf, self.external_file_attributes);
         put_u32(
-            &mut buf,
+            buf,
             if use_zip64 {
                 u32::MAX
             } else {
@@ -112,7 +115,7 @@ impl CentralDirEntry {
         buf.extend_from_slice(&self.name);
         buf.extend_from_slice(&extra);
         buf.extend_from_slice(comment);
-        Ok(buf)
+        Ok(())
     }
 }
 
@@ -139,11 +142,12 @@ mod tests {
             external_file_attributes: 0,
             comment: None,
         };
-        let data = cde.serialize().unwrap();
-        assert_eq!(read_u32(&data, 0), CD_SIG);
-        assert_eq!(read_u32(&data, 16), 0xDEADBEEF);
-        assert_eq!(read_u32(&data, 20), 500);
-        assert_eq!(read_u32(&data, 24), 1000);
+        let mut buf = Vec::new();
+        cde.write_to(&mut buf).unwrap();
+        assert_eq!(read_u32(&buf, 0), CD_SIG);
+        assert_eq!(read_u32(&buf, 16), 0xDEADBEEF);
+        assert_eq!(read_u32(&buf, 20), 500);
+        assert_eq!(read_u32(&buf, 24), 1000);
     }
 
     #[test]
@@ -164,16 +168,17 @@ mod tests {
             external_file_attributes: 0,
             comment: None,
         };
-        let data = cde.serialize().unwrap();
-        assert_eq!(read_u32(&data, 0), CD_SIG);
-        assert_eq!(read_u32(&data, 20), u32::MAX);
-        assert_eq!(read_u32(&data, 24), u32::MAX);
-        assert_eq!(read_u16(&data, 6), VERSION_ZIP64);
-        let name_len = read_u16(&data, 28) as usize;
-        let extra_len = read_u16(&data, 30) as usize;
+        let mut buf = Vec::new();
+        cde.write_to(&mut buf).unwrap();
+        assert_eq!(read_u32(&buf, 0), CD_SIG);
+        assert_eq!(read_u32(&buf, 20), u32::MAX);
+        assert_eq!(read_u32(&buf, 24), u32::MAX);
+        assert_eq!(read_u16(&buf, 6), VERSION_ZIP64);
+        let name_len = read_u16(&buf, 28) as usize;
+        let extra_len = read_u16(&buf, 30) as usize;
         assert_eq!(extra_len, 28);
         let extra_start = 46 + name_len;
-        let extra = &data[extra_start..extra_start + extra_len];
+        let extra = &buf[extra_start..extra_start + extra_len];
         assert_eq!(read_u16(extra, 0), 0x0001);
         assert_eq!(read_u16(extra, 2), 24);
         assert_eq!(read_u64(extra, 4), 10_000_000_000);
@@ -201,17 +206,18 @@ mod tests {
             external_file_attributes: 0,
             comment: None,
         };
-        let data = cde.serialize().unwrap();
+        let mut buf = Vec::new();
+        cde.write_to(&mut buf).unwrap();
 
-        assert_eq!(read_u32(&data, 20), u32::MAX);
-        assert_eq!(read_u32(&data, 24), u32::MAX);
+        assert_eq!(read_u32(&buf, 20), u32::MAX);
+        assert_eq!(read_u32(&buf, 24), u32::MAX);
 
-        let name_len = read_u16(&data, 28) as usize;
-        let extra_len = read_u16(&data, 30) as usize;
+        let name_len = read_u16(&buf, 28) as usize;
+        let extra_len = read_u16(&buf, 30) as usize;
         assert_eq!(extra_len, 37);
 
         let extra_start = 46 + name_len;
-        let extra_data = &data[extra_start..extra_start + extra_len];
+        let extra_data = &buf[extra_start..extra_start + extra_len];
         assert_eq!(&extra_data[0..2], b"UT");
         assert_eq!(read_u16(extra_data, 9), 0x0001);
         assert_eq!(read_u16(extra_data, 11), 24);
@@ -235,7 +241,8 @@ mod tests {
             external_file_attributes: 0,
             comment: None,
         };
-        let result = cde.serialize();
+        let mut buf = Vec::new();
+        let result = cde.write_to(&mut buf);
         assert!(result.is_err());
         assert!(
             result

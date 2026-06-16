@@ -54,9 +54,11 @@ impl StoredEntry {
             (None, false) => 0,
         };
 
-        let use_zip64 = self.compressed_size > zip_format::U32_MAX
-            || self.uncompressed_size > zip_format::U32_MAX
-            || self.local_header_offset > zip_format::U32_MAX;
+        let use_zip64 = zip_format::entry_needs_zip64(
+            self.compressed_size,
+            self.uncompressed_size,
+            self.local_header_offset,
+        );
 
         let mut flags = zip_format::FLAG_DATA_DESC;
         if !self.name.is_ascii() {

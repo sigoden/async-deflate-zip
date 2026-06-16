@@ -145,7 +145,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let mut inner = self.take_inner()?;
 
-        let is_stored = self.level.level() == 0;
+        let is_stored = self.level.value() == 0;
         let method = if is_stored {
             zip_format::METHOD_STORED
         } else {

@@ -17,9 +17,15 @@ pub(crate) struct LocalFileHeader {
 }
 
 impl LocalFileHeader {
-    pub(crate) fn new(name: &str, method: u16, zip64: bool, mtime: SystemTime) -> Self {
+    pub(crate) fn new(
+        name: &str,
+        method: u16,
+        zip64: bool,
+        mtime: SystemTime,
+        use_data_desc: bool,
+    ) -> Self {
         let (time, date) = system_time_to_ms_dos(mtime);
-        let mut flags = FLAG_DATA_DESC;
+        let mut flags = if use_data_desc { FLAG_DATA_DESC } else { 0 };
         if !name.is_ascii() {
             flags |= 1 << 11;
         }
@@ -121,7 +127,13 @@ mod tests {
 
     #[test]
     fn test_lfh_normal_case() {
-        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false, SystemTime::UNIX_EPOCH);
+        let lfh = LocalFileHeader::new(
+            "test.txt",
+            METHOD_DEFLATE,
+            false,
+            SystemTime::UNIX_EPOCH,
+            true,
+        );
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), 47);
@@ -133,8 +145,26 @@ mod tests {
     }
 
     #[test]
+    fn test_lfh_no_data_desc() {
+        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, false, SystemTime::UNIX_EPOCH, false);
+        let mut buf = Vec::new();
+        lfh.write_to(&mut buf).unwrap();
+        assert_eq!(buf.len(), 43);
+        assert!(
+            buf[6] & (1 << 3) == 0,
+            "bit 3 should be 0 for directory entries"
+        );
+    }
+
+    #[test]
     fn test_lfh_zip64_case() {
-        let lfh = LocalFileHeader::new("bigfile.bin", METHOD_DEFLATE, true, SystemTime::UNIX_EPOCH);
+        let lfh = LocalFileHeader::new(
+            "bigfile.bin",
+            METHOD_DEFLATE,
+            true,
+            SystemTime::UNIX_EPOCH,
+            true,
+        );
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(read_u16(&buf, 4), VERSION_ZIP64);
@@ -146,16 +176,21 @@ mod tests {
         assert_eq!(read_u16(extra, 0), 0x5455);
         assert_eq!(read_u16(extra, 9), 0x0001);
 
-        let lfh = LocalFileHeader::new("bigdir", METHOD_STORED, true, SystemTime::UNIX_EPOCH);
+        let lfh =
+            LocalFileHeader::new("bigdir", METHOD_STORED, true, SystemTime::UNIX_EPOCH, false);
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(read_u16(&buf, 4), VERSION_ZIP64);
+        assert!(
+            buf[6] & (1 << 3) == 0,
+            "bit 3 should be 0 for directory entries"
+        );
     }
 
     #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false, SystemTime::UNIX_EPOCH);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false, SystemTime::UNIX_EPOCH, true);
         let mut buf = Vec::new();
         let result = lfh.write_to(&mut buf);
         assert!(result.is_err());

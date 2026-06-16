@@ -57,7 +57,11 @@ impl StoredEntry {
             self.local_header_offset,
         );
 
-        let mut flags = zip_format::FLAG_DATA_DESC;
+        let mut flags = if self.is_directory {
+            0
+        } else {
+            zip_format::FLAG_DATA_DESC
+        };
         if !self.name.is_ascii() {
             flags |= 1 << 11; // EFS / UTF-8 flag (bit 11), consistent with LocalFileHeader::new()
         }

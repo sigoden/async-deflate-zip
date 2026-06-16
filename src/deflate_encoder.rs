@@ -194,11 +194,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                 return Poll::Ready(Ok(consumed));
             }
 
-            // consumed == 0 and produced == 0 means no progress possible —
-            // return 0 to signal EOF-like condition (shouldn't happen during
-            // normal operation unless the compressor is finished).
             if produced == 0 {
-                return Poll::Ready(Ok(0));
+                // deflate encoder stalled — not expected during normal
+                // operation. Error instead of Ok(0) so write_all() does
+                // not misinterpret it as EOF and silently truncate output.
+                return Poll::Ready(Err(io::Error::other("deflate encoder stalled")));
             }
 
             // consumed == 0 but produced > 0: the output buffer was full.

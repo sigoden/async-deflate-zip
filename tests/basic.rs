@@ -51,34 +51,43 @@ async fn basic_disk_files() {
     let (_dir, zip_path) = common::zip::zip_path("basic_disk");
     let src_dir = tempfile::TempDir::new().unwrap();
 
-    // Create two source files on disk
-    let src1_path = src_dir.path().join("from_reader.txt");
-    let src2_path = src_dir.path().join("from_copy.txt");
-    let content1: &[u8] = b"Added via add_reader with tokio::fs::File";
-    let content2: &[u8] = b"Added via start_file + tokio::io::copy";
+    // Create three source files on disk
+    let name1 = "add_file.txt";
+    let name2 = "add_reader.txt";
+    let name3 = "start_file.txt";
+    let content1: &[u8] = b"Added via add_file";
+    let content2: &[u8] = b"Added via add_reader with tokio::fs::File";
+    let content3: &[u8] = b"Added via start_file + tokio::io::copy";
+
+    let src1_path = src_dir.path().join(name1);
+    let src2_path = src_dir.path().join(name2);
+    let src3_path = src_dir.path().join(name3);
 
     tokio::fs::write(&src1_path, content1).await.unwrap();
     tokio::fs::write(&src2_path, content2).await.unwrap();
+    tokio::fs::write(&src3_path, content3).await.unwrap();
 
-    // Method 1: add_reader with a tokio::fs::File
+    // Method 1: add_file
     let file = tokio::fs::File::create(&zip_path).await.unwrap();
     let mut zip = ZipWriter::new(file);
-    let file1 = tokio::fs::File::open(&src1_path).await.unwrap();
-    let opts1 = EntryOptions::from_path(&src1_path).await.unwrap();
-    zip.add_reader("from_reader.txt", file1, &opts1)
-        .await
-        .unwrap();
+    zip.add_file(name1, &src1_path).await.unwrap();
 
-    // Method 2: start_file + tokio::io::copy
+    // Method 2: add_reader with a tokio::fs::File
+    let file2 = tokio::fs::File::open(&src2_path).await.unwrap();
     let opts2 = EntryOptions::from_path(&src2_path).await.unwrap();
-    let mut entry = zip.start_file("from_copy.txt", &opts2).await.unwrap();
-    let mut file2 = tokio::fs::File::open(&src2_path).await.unwrap();
-    tokio::io::copy(&mut file2, &mut entry).await.unwrap();
+    zip.add_reader(name2, file2, &opts2).await.unwrap();
+
+    // Method 3: start_file + tokio::io::copy
+    let opts3 = EntryOptions::from_path(&src3_path).await.unwrap();
+    let mut entry = zip.start_file(name3, &opts3).await.unwrap();
+    let mut file3 = tokio::fs::File::open(&src3_path).await.unwrap();
+    tokio::io::copy(&mut file3, &mut entry).await.unwrap();
     entry.finish().await.unwrap();
 
     zip.finish().await.unwrap();
 
-    common::verify::verify_zip(&zip_path, 2);
-    common::verify::verify_entry_content(&zip_path, "from_reader.txt", content1);
-    common::verify::verify_entry_content(&zip_path, "from_copy.txt", content2);
+    common::verify::verify_zip(&zip_path, 3);
+    common::verify::verify_entry_content(&zip_path, name1, content1);
+    common::verify::verify_entry_content(&zip_path, name2, content2);
+    common::verify::verify_entry_content(&zip_path, name3, content3);
 }

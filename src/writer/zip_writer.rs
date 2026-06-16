@@ -16,9 +16,10 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 /// A streaming ZIP archive writer with per-file deflate compression.
 ///
 /// Entries are written sequentially — each file produces its own deflate
-/// frame with a data descriptor (CRC-32 and sizes) after each entry. The output is a
-/// standard ZIP archive compatible with common unzip tools, including
-/// Windows Explorer.
+/// frame with a data descriptor (CRC-32 and sizes) after each entry.
+/// Directory entries omit the data descriptor (CRC-32 and sizes are zero
+/// and written directly in the Local File Header). The output is a standard
+/// ZIP archive compatible with common unzip tools, including Windows Explorer.
 ///
 /// # Example
 ///
@@ -155,7 +156,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         };
 
         let needs_zip64 = self.pos > zip_format::U32_MAX;
-        let lfh = zip_format::LocalFileHeader::new(&name, method, needs_zip64, *options.mtime());
+        let lfh =
+            zip_format::LocalFileHeader::new(&name, method, needs_zip64, *options.mtime(), true);
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;
         inner.write_all(&self.scratch).await?;
@@ -256,8 +258,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
     /// Start a new directory entry.
     ///
-    /// Writes the Local File Header and Data Descriptor, then registers
-    /// the entry in the archive. Directory names should end with `'/'`.
+    /// Writes the Local File Header (with CRC-32 and sizes set to 0, and
+    /// GPBF bit 3 cleared — no Data Descriptor), then registers the entry
+    /// in the archive. Directory names should end with `'/'`.
     ///
     /// # Errors
     ///
@@ -294,25 +297,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_STORED,
             needs_zip64,
             *options.mtime(),
+            false,
         );
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;
         inner.write_all(&self.scratch).await?;
         let offset = self.pos;
-        self.pos += self.scratch.len() as u64;
-
-        let dd = zip_format::DataDescriptor {
-            crc32: 0,
-            compressed_size: 0,
-            uncompressed_size: 0,
-            zip64: offset > zip_format::U32_MAX,
-        };
-        self.scratch.clear();
-        dd.write_to(&mut self.scratch);
-        inner.write_all(&self.scratch).await.map_err(|e| {
-            self.poisoned = true;
-            ZipError::Io(e)
-        })?;
         self.pos += self.scratch.len() as u64;
 
         let unix_mtime = zip_format::system_time_to_unix_secs(*options.mtime());
@@ -379,6 +369,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_STORED,
             needs_zip64,
             *options.mtime(),
+            true,
         );
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;

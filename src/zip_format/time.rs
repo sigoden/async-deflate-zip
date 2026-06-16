@@ -15,7 +15,7 @@ pub(crate) fn system_time_to_ms_dos(t: SystemTime) -> (u16, u16) {
     let day = dt.day() as u16;
     let hour = dt.hour() as u16;
     let minute = dt.minute() as u16;
-    let dos_sec = (dt.second() as u16).div_ceil(2);
+    let dos_sec = (dt.second() as u16) / 2;
     let date = ((y - 1980) as u16) << 9 | m << 5 | day;
     let time = hour << 11 | minute << 5 | dos_sec;
     (time, date)

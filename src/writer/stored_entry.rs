@@ -29,9 +29,6 @@ impl StoredEntry {
         };
 
         let mut extra = Vec::new();
-        if !self.name.is_ascii() {
-            zip_format::UnicodePathExtra::new(&self.name).serialize(&mut extra);
-        }
         zip_format::ExtendedTimestampExtra::new(self.unix_mtime).serialize(&mut extra);
         if let Some((uid, gid)) = self.uid_gid {
             zip_format::UnixUidGidExtra::new(uid, gid).serialize(&mut extra);

@@ -45,9 +45,6 @@ impl LocalFileHeader {
             extra: {
                 let mut extra = Vec::new();
                 ExtendedTimestampExtra::new(unix_secs).serialize(&mut extra);
-                if !name.is_ascii() {
-                    UnicodePathExtra::new(name).serialize(&mut extra);
-                }
                 if zip64 {
                     Zip64Extra::LocalFileHeader.serialize(&mut extra);
                 }

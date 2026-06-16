@@ -201,7 +201,8 @@ fn test_zip64_eocdr_locator() {
 
 #[test]
 fn test_central_dir_entry_zip64_with_extra_field() {
-    let timestamp_extra = build_extended_timestamp_extra(1700000000);
+    let mut timestamp_extra = Vec::new();
+    ExtendedTimestampExtra::new(1700000000).serialize(&mut timestamp_extra);
     let cde = CentralDirEntry {
         version_made_by: VERSION_UNIX,
         version_needed: VERSION_DEFLATE,

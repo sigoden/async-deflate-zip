@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -31,21 +30,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CountWriter<W> {
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-/// Normalize a ZIP entry path: replace backslashes with forward slashes
-/// and ensure directories end with `/`.
-pub(crate) fn sanitize_path(name: &str, is_directory: bool) -> Cow<'_, str> {
-    let sanitized = if name.contains('\\') {
-        Cow::Owned(name.replace('\\', "/"))
-    } else {
-        Cow::Borrowed(name)
-    };
-    if is_directory && !sanitized.ends_with('/') {
-        Cow::Owned(format!("{sanitized}/"))
-    } else {
-        sanitized
     }
 }
 

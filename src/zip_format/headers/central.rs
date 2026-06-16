@@ -1,7 +1,6 @@
 use crate::error::ZipError;
 use crate::zip_format::binary::*;
 use crate::zip_format::constants::*;
-use crate::zip_format::extra_fields::*;
 
 pub(crate) struct CentralDirEntry {
     pub(crate) version_made_by: u16,
@@ -36,23 +35,10 @@ impl CentralDirEntry {
             self.local_header_offset,
         );
 
-        let extra = if use_zip64 {
-            let mut extra = self.extra.clone();
-            Zip64Extra::CentralDirectory {
-                uncompressed_size: self.uncompressed_size,
-                compressed_size: self.compressed_size,
-                offset: self.local_header_offset,
-            }
-            .serialize(&mut extra);
-            extra
-        } else {
-            self.extra.clone()
-        };
-
-        if extra.len() > u16::MAX as usize {
+        if self.extra.len() > u16::MAX as usize {
             return Err(ZipError::FieldTooLong {
                 field: "CentralDirEntry extra",
-                len: extra.len(),
+                len: self.extra.len(),
                 max: u16::MAX as usize,
             });
         }
@@ -66,7 +52,7 @@ impl CentralDirEntry {
         }
 
         buf.clear();
-        buf.reserve(46 + self.name.len() + extra.len() + comment.len());
+        buf.reserve(46 + self.name.len() + self.extra.len() + comment.len());
         put_u32(buf, CD_SIG);
         put_u16(buf, self.version_made_by);
         put_u16(
@@ -99,7 +85,7 @@ impl CentralDirEntry {
             },
         );
         put_u16(buf, self.name.len() as u16);
-        put_u16(buf, extra.len() as u16);
+        put_u16(buf, self.extra.len() as u16);
         put_u16(buf, comment.len() as u16);
         put_u16(buf, 0);
         put_u16(buf, 0);
@@ -113,7 +99,7 @@ impl CentralDirEntry {
             },
         );
         buf.extend_from_slice(&self.name);
-        buf.extend_from_slice(&extra);
+        buf.extend_from_slice(&self.extra);
         buf.extend_from_slice(comment);
         Ok(())
     }
@@ -152,6 +138,13 @@ mod tests {
 
     #[test]
     fn test_cd_zip64_case() {
+        let mut zip64_extra = Vec::new();
+        Zip64Extra {
+            uncompressed_size: 10_000_000_000,
+            compressed_size: 5_000_000_000,
+            offset: 0,
+        }
+        .serialize(&mut zip64_extra);
         let cde = CentralDirEntry {
             version_made_by: VERSION_DEFLATE,
             version_needed: VERSION_DEFLATE,
@@ -163,7 +156,7 @@ mod tests {
             compressed_size: 5_000_000_000,
             uncompressed_size: 10_000_000_000,
             name: b"big_file.bin".to_vec(),
-            extra: Vec::new(),
+            extra: zip64_extra,
             local_header_offset: 0,
             external_file_attributes: 0,
             comment: None,
@@ -188,8 +181,14 @@ mod tests {
 
     #[test]
     fn test_cd_zip64_with_extra_field() {
-        let mut timestamp_extra = Vec::new();
-        ExtendedTimestampExtra::new(1700000000).serialize(&mut timestamp_extra);
+        let mut combined_extra = Vec::new();
+        ExtendedTimestampExtra::new(1700000000).serialize(&mut combined_extra);
+        Zip64Extra {
+            uncompressed_size: 10_000_000_000,
+            compressed_size: 5_000_000_000,
+            offset: 0,
+        }
+        .serialize(&mut combined_extra);
         let cde = CentralDirEntry {
             version_made_by: VERSION_UNIX,
             version_needed: VERSION_DEFLATE,
@@ -201,7 +200,7 @@ mod tests {
             compressed_size: 5_000_000_000,
             uncompressed_size: 10_000_000_000,
             name: b"big_with_ts.bin".to_vec(),
-            extra: timestamp_extra.clone(),
+            extra: combined_extra,
             local_header_offset: 0,
             external_file_attributes: 0,
             comment: None,

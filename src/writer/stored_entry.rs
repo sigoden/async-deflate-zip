@@ -20,18 +20,28 @@ impl StoredEntry {
     pub(crate) fn to_central_dir_entry(&self) -> zip_format::CentralDirEntry {
         let (time, date) = zip_format::unix_secs_to_ms_dos(self.unix_mtime);
 
-        let has_unix_attrs =
-            self.unix_permissions.is_some() || self.is_symlink || self.unix_mtime != 0;
-        let version_made_by = if has_unix_attrs {
-            zip_format::VERSION_UNIX
-        } else {
-            zip_format::VERSION_DEFLATE
-        };
+        let version_made_by = zip_format::VERSION_UNIX;
 
         let mut extra = Vec::new();
-        zip_format::ExtendedTimestampExtra::new(self.unix_mtime).serialize(&mut extra);
+        if self.unix_mtime != 0 {
+            zip_format::ExtendedTimestampExtra::new(self.unix_mtime).serialize(&mut extra);
+        }
         if let Some((uid, gid)) = self.uid_gid {
             zip_format::UnixUidGidExtra::new(uid, gid).serialize(&mut extra);
+        }
+
+        let use_zip64 = zip_format::entry_needs_zip64(
+            self.compressed_size,
+            self.uncompressed_size,
+            self.local_header_offset,
+        );
+        if use_zip64 {
+            zip_format::Zip64Extra {
+                uncompressed_size: self.uncompressed_size,
+                compressed_size: self.compressed_size,
+                offset: self.local_header_offset,
+            }
+            .serialize(&mut extra);
         }
 
         let file_type_bit: u32 = if self.is_symlink {
@@ -44,18 +54,12 @@ impl StoredEntry {
         let external_file_attributes = match (self.unix_permissions, self.is_symlink) {
             (Some(mode), _) => (mode | file_type_bit) << 16,
             (None, true) => file_type_bit << 16,
-            (None, false) if has_unix_attrs => {
+            (None, false) if self.unix_mtime != 0 => {
                 let default_mode = if self.is_directory { 0o755 } else { 0o644 };
                 (default_mode | file_type_bit) << 16
             }
             (None, false) => 0,
         };
-
-        let use_zip64 = zip_format::entry_needs_zip64(
-            self.compressed_size,
-            self.uncompressed_size,
-            self.local_header_offset,
-        );
 
         let mut flags = if self.is_directory {
             0
@@ -63,7 +67,7 @@ impl StoredEntry {
             zip_format::FLAG_DATA_DESC
         };
         if !self.name.is_ascii() {
-            flags |= 1 << 11; // EFS / UTF-8 flag (bit 11), consistent with LocalFileHeader::new()
+            flags |= 1 << 11;
         }
 
         zip_format::CentralDirEntry {
@@ -134,16 +138,10 @@ mod tests {
         assert_eq!(cd.crc32, 0x12345678);
         assert_eq!(cd.method, zip_format::METHOD_STORED);
         assert_eq!(cd.version_needed, zip_format::VERSION_STORED);
-        assert_eq!(cd.version_made_by, zip_format::VERSION_DEFLATE);
-        assert_eq!(
-            cd.extra.len(),
-            9,
-            "expected 9-byte extended timestamp extra, got {}",
-            cd.extra.len()
-        );
+        assert_eq!(cd.version_made_by, zip_format::VERSION_UNIX);
         assert!(
-            cd.extra.windows(2).any(|w| w == b"UT"),
-            "extra should contain UT (0x5455) tag"
+            cd.extra.is_empty(),
+            "expected no extra fields when unix_mtime=0 and no uid_gid"
         );
     }
 
@@ -259,7 +257,7 @@ mod tests {
         assert_eq!(
             cd.version_needed,
             zip_format::VERSION_ZIP64,
-            "version_needed should be VERSION_ZIP64 (20) for entries needing ZIP64"
+            "version_needed should be VERSION_ZIP64 (45) for entries needing ZIP64"
         );
         assert_eq!(cd.method, zip_format::METHOD_DEFLATE);
     }

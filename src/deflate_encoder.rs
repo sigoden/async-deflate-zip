@@ -2,7 +2,8 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use flate2::{Compress, Compression, FlushCompress, Status};
+use crate::CompressionLevel;
+use flate2::{Compress, FlushCompress, Status};
 use tokio::io::AsyncWrite;
 
 /// Async-only Deflate encoder implementing `tokio::io::AsyncWrite`.
@@ -30,7 +31,7 @@ pub(crate) struct DeflateEncoder<W: AsyncWrite + Unpin> {
 
 impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
     /// Create a new `DeflateEncoder` wrapping `inner` with the given compression level.
-    pub(crate) fn new(inner: W, level: Compression) -> Self {
+    pub(crate) fn new(inner: W, level: CompressionLevel) -> Self {
         Self {
             inner,
             // false = raw deflate (no zlib header/trailer)
@@ -225,7 +226,7 @@ mod tests {
     use super::*;
 
     /// Helper: drain output from encoder into a Vec.
-    async fn compress(data: &[u8], level: Compression) -> Vec<u8> {
+    async fn compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut encoder = DeflateEncoder::new(&mut buf, level);
         tokio::io::AsyncWriteExt::write_all(&mut encoder, data)
@@ -264,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn test_encoder_produces_valid_deflate() {
         let data = b"Hello, World! This is a test of the deflate encoder.";
-        let compressed = compress(data, Compression::default()).await;
+        let compressed = compress(data, CompressionLevel::default()).await;
         let decompressed = decompress(&compressed, data.len());
         assert_eq!(&decompressed, data);
     }
@@ -272,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn test_encoder_compresses_repeated_data() {
         let data = vec![b'A'; 4096];
-        let compressed = compress(&data, Compression::best()).await;
+        let compressed = compress(&data, CompressionLevel::best()).await;
         assert!(
             compressed.len() < data.len(),
             "compressed size {} should be less than uncompressed {}",
@@ -284,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_encoder_no_compression_level_0() {
         let data = vec![b'A'; 1024];
-        let compressed = compress(&data, Compression::none()).await;
+        let compressed = compress(&data, CompressionLevel::none()).await;
         assert!(
             compressed.len() >= data.len(),
             "level 0 should not compress (got {} < {})",
@@ -296,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn test_encoder_empty_input() {
         let data = b"";
-        let compressed = compress(data, Compression::default()).await;
+        let compressed = compress(data, CompressionLevel::default()).await;
         assert!(
             !compressed.is_empty(),
             "empty input should produce deflate end marker"
@@ -308,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn test_encoder_large_data() {
         let data: Vec<u8> = (0..100_000u32).map(|i| (i % 256) as u8).collect();
-        let compressed = compress(&data, Compression::default()).await;
+        let compressed = compress(&data, CompressionLevel::default()).await;
         assert!(
             compressed.len() < data.len(),
             "100KB of cyclic data should compress"
@@ -350,7 +351,7 @@ mod tests {
             data: Vec::new(),
             shutdown_called: false,
         };
-        let mut encoder = DeflateEncoder::new(tracker, Compression::default());
+        let mut encoder = DeflateEncoder::new(tracker, CompressionLevel::default());
         tokio::io::AsyncWriteExt::write_all(&mut encoder, b"test data")
             .await
             .unwrap();
@@ -374,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn test_into_inner_after_shutdown() {
         let mut buf = Vec::new();
-        let mut encoder = DeflateEncoder::new(&mut buf, Compression::default());
+        let mut encoder = DeflateEncoder::new(&mut buf, CompressionLevel::default());
         tokio::io::AsyncWriteExt::write_all(&mut encoder, b"hello")
             .await
             .unwrap();

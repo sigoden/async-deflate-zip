@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Dispatch an `AsyncWrite` method to the active writer (stored or deflated).
-/// Returns `Poisoned` error if the entry has already been closed.
+/// Returns `EntryWriterCorrupted` error if the entry has already been closed.
 macro_rules! poll_active_writer {
     ($this:expr, $cx:expr, $method:ident $(, $args:expr)*) => {{
         let writer: Option<Pin<&mut dyn AsyncWrite>> = if *$this.is_stored {
@@ -29,9 +29,7 @@ macro_rules! poll_active_writer {
             Some(mut w) => w.as_mut().$method($cx $(, $args)*),
             None => {
                 $this.zip.poisoned = true;
-                Poll::Ready(Err(io::Error::other(ZipError::Poisoned(
-                    "entry already closed".to_string(),
-                ))))
+                Poll::Ready(Err(io::Error::other(ZipError::EntryWriterCorrupted)))
             }
         }
     }};
@@ -40,14 +38,14 @@ macro_rules! poll_active_writer {
 pin_project_lite::pin_project! {
     /// A streaming writer for a single file entry in a ZIP archive.
     ///
-    /// Obtained from [`ZipWriter::append_file`]. Data written through this
+    /// Obtained from [`ZipWriter::start_file`]. Data written through this
     /// writer is compressed with DEFLATE and streamed to the underlying output.
     ///
     /// # Important
     ///
-    /// The [`close`](EntryWriter::close) method **must** be called after all
-    /// data is written to finalize the deflate frame and write the Data
-    /// Descriptor. Dropping without closing will lose the entry.
+    /// The [`finish`](EntryWriter::finish) method **must** be called after all
+    /// data is written to finish the deflate frame and write the Data
+    /// Descriptor. Dropping without finishing will lose the entry.
     pub struct EntryWriter<'a, W>
     where
         W: AsyncWrite,
@@ -77,7 +75,7 @@ pin_project_lite::pin_project! {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             if this.deflate_encoder.is_some() || this.passthrough.is_some() {
-                // close() was never called — mark the ZipWriter as poisoned
+                // finish() was never called — mark the ZipWriter as poisoned
                 this.zip.poisoned = true;
             }
         }
@@ -95,21 +93,21 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if `close` is called more than once, if the deflate
+    /// Returns [`ZipError`] if `finish` is called more than once, if the deflate
     /// encoder fails to shut down (I/O error), or if writing the Data
     /// Descriptor fails (I/O error).
-    pub async fn close(mut self) -> Result<(), ZipError> {
+    pub async fn finish(mut self) -> Result<(), ZipError> {
         let (compressed_size, mut inner) = if self.is_stored {
             let cw = self
                 .passthrough
                 .take()
-                .ok_or_else(|| ZipError::InvalidState("entry already closed".to_string()))?;
+                .ok_or(ZipError::EntryWriterCorrupted)?;
             (cw.count, cw.inner)
         } else {
             let mut encoder = self
                 .deflate_encoder
                 .take()
-                .ok_or_else(|| ZipError::InvalidState("entry already closed".to_string()))?;
+                .ok_or(ZipError::EntryWriterCorrupted)?;
             encoder.shutdown().await?;
 
             // Extract the inner writer from the encoder stack
@@ -195,38 +193,26 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::ZipError;
     use std::time::SystemTime;
     use tokio::io::AsyncWriteExt;
-
-    fn opts_mtime(t: SystemTime) -> EntryOptions {
-        EntryOptions {
-            mtime: t,
-            permissions: None,
-            uid_gid: None,
-            comment: None,
-        }
-    }
-
-    fn opts_perms(mode: u32) -> EntryOptions {
-        EntryOptions {
-            mtime: SystemTime::now(),
-            permissions: Some(mode),
-            uid_gid: None,
-            comment: None,
-        }
-    }
 
     #[tokio::test]
     async fn test_entry_mtime_epoch() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
-            .append_file("epoch.txt", opts_mtime(SystemTime::UNIX_EPOCH))
+            .start_file(
+                "epoch.txt",
+                EntryOptions::file()
+                    .with_mtime(SystemTime::UNIX_EPOCH)
+                    .with_unix_permissions(0o644),
+            )
             .await
             .unwrap();
         entry.write_all(b"test").await.unwrap();
-        entry.close().await.unwrap();
-        zip.finalize().await.unwrap();
+        entry.finish().await.unwrap();
+        zip.finish().await.unwrap();
 
         let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
         let cd = &buf[pos..];
@@ -248,10 +234,13 @@ mod tests {
         for (mode, name) in [(0o644, "perm_test.txt"), (0o4755, "setuid_test.txt")] {
             let mut buf = Vec::new();
             let mut zip = ZipWriter::new(&mut buf);
-            let mut entry = zip.append_file(name, opts_perms(mode)).await.unwrap();
+            let mut entry = zip
+                .start_file(name, EntryOptions::file().with_unix_permissions(mode))
+                .await
+                .unwrap();
             entry.write_all(b"test").await.unwrap();
-            entry.close().await.unwrap();
-            zip.finalize().await.unwrap();
+            entry.finish().await.unwrap();
+            zip.finish().await.unwrap();
             let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
             let cd = &buf[pos..];
             let efa = u32::from_le_bytes(cd[38..42].try_into().unwrap());
@@ -266,12 +255,12 @@ mod tests {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
         let mut entry = zip
-            .append_file("mtime_test.txt", opts_mtime(SystemTime::now()))
+            .start_file("mtime_test.txt", EntryOptions::file())
             .await
             .unwrap();
         entry.write_all(b"hello").await.unwrap();
-        entry.close().await.unwrap();
-        zip.finalize().await.unwrap();
+        entry.finish().await.unwrap();
+        zip.finish().await.unwrap();
 
         let pos = buf.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
         let cd = &buf[pos..];
@@ -299,35 +288,35 @@ mod tests {
         let mut zip = ZipWriter::new(&mut buf);
 
         drop(
-            zip.append_file("lost.txt", EntryOptions::file())
+            zip.start_file("lost.txt", EntryOptions::file())
                 .await
                 .unwrap(),
         );
 
-        let result = zip.append_file("another.txt", EntryOptions::file()).await;
+        let result = zip.start_file("another.txt", EntryOptions::file()).await;
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.err().unwrap();
         assert!(
-            err.to_string().contains("archive corrupted"),
-            "expected 'archive corrupted', got: {err}"
+            matches!(err, ZipError::EntryWriterCorrupted),
+            "expected EntryWriterCorrupted, got: {err}"
         );
     }
 
     #[tokio::test]
-    async fn test_entry_drop_poison_affects_finalize() {
+    async fn test_entry_drop_poison_affects_finish() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
 
         drop(
-            zip.append_file("lost.txt", EntryOptions::file())
+            zip.start_file("lost.txt", EntryOptions::file())
                 .await
                 .unwrap(),
         );
 
-        let err = zip.finalize().await.unwrap_err();
+        let err = zip.finish().await.unwrap_err();
         assert!(
-            err.to_string().contains("archive corrupted"),
-            "expected 'archive corrupted', got: {err}"
+            matches!(err, ZipError::EntryWriterCorrupted),
+            "expected EntryWriterCorrupted, got: {err}"
         );
     }
 }

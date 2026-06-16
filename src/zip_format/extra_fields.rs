@@ -48,27 +48,6 @@ impl ExtraField for UnixUidGidExtra {
     }
 }
 
-pub(crate) struct UnicodePathExtra {
-    name: Vec<u8>,
-}
-
-impl UnicodePathExtra {
-    pub(crate) fn new(name: &str) -> Self {
-        Self {
-            name: name.as_bytes().to_vec(),
-        }
-    }
-}
-
-impl ExtraField for UnicodePathExtra {
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        put_u16(buf, 0x7075);
-        put_u16(buf, (self.name.len() + 1) as u16);
-        put_u8(buf, 1);
-        buf.extend_from_slice(&self.name);
-    }
-}
-
 pub(crate) enum Zip64Extra {
     LocalFileHeader,
     CentralDirectory {

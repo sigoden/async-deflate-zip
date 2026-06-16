@@ -30,6 +30,8 @@ pub(crate) struct DeflateEncoder<W: AsyncWrite + Unpin> {
     /// Number of valid compressed bytes in `out_buf`.
     out_len: usize,
     finished: bool,
+    /// Total bytes written to the inner writer.
+    written: u64,
 }
 
 impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
@@ -49,6 +51,7 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
             out_pos: 0,
             out_len: 0,
             finished: false,
+            written: 0,
         }
     }
 
@@ -56,6 +59,11 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
     #[allow(dead_code)]
     pub(crate) fn get_ref(&self) -> &W {
         &self.inner
+    }
+
+    /// Total compressed bytes written to the inner writer.
+    pub(crate) fn written(&self) -> u64 {
+        self.written
     }
 
     /// Consume the encoder and return the inner writer.
@@ -79,7 +87,10 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
                         "underlying writer returned 0 bytes",
                     )));
                 }
-                Poll::Ready(Ok(n)) => this.out_pos += n,
+                Poll::Ready(Ok(n)) => {
+                    this.out_pos += n;
+                    this.written += n as u64;
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }

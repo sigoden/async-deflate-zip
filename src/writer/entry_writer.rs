@@ -1,6 +1,5 @@
 use super::stored_entry::StoredEntry;
 use super::zip_writer::ZipWriter;
-use crate::count_writer::CountWriter;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
@@ -53,12 +52,13 @@ pin_project_lite::pin_project! {
     {
         pub(crate) zip: &'a mut ZipWriter<W>,
         #[pin]
-        pub(crate) deflate_encoder: Option<DeflateEncoder<CountWriter<W>>>,
+        pub(crate) deflate_encoder: Option<DeflateEncoder<W>>,
         #[pin]
-        pub(crate) passthrough: Option<CountWriter<W>>,
+        pub(crate) passthrough: Option<W>,
         pub(crate) is_stored: bool,
         pub(crate) crc_hasher: crc32fast::Hasher,
         pub(crate) uncompressed_size: u64,
+        pub(crate) compressed_size: u64,
         pub(crate) local_header_offset: u64,
         pub(crate) name: String,
         pub(crate) mtime: SystemTime,
@@ -97,52 +97,51 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
     /// encoder fails to shut down (I/O error), or if writing the Data
     /// Descriptor fails (I/O error).
     pub async fn finish(mut self) -> Result<(), ZipError> {
-        let (compressed_size, mut inner) = if self.is_stored {
-            let cw = self
-                .passthrough
+        let mut inner = if self.is_stored {
+            self.compressed_size = self.uncompressed_size;
+            self.passthrough
                 .take()
-                .ok_or(ZipError::EntryWriterCorrupted)?;
-            (cw.count, cw.inner)
+                .ok_or(ZipError::EntryWriterCorrupted)?
         } else {
             let mut encoder = self
                 .deflate_encoder
                 .take()
                 .ok_or(ZipError::EntryWriterCorrupted)?;
             encoder.shutdown().await?;
-
-            // Extract the inner writer from the encoder stack
-            let count_writer: CountWriter<W> = encoder.into_inner();
-            let compressed_size = count_writer.count;
-            (compressed_size, count_writer.inner)
+            self.compressed_size = encoder.written();
+            encoder.into_inner()
         };
 
         let crc32 = self.crc_hasher.clone().finalize();
 
         let dd = zip_format::DataDescriptor {
             crc32,
-            compressed_size,
+            compressed_size: self.compressed_size,
             uncompressed_size: self.uncompressed_size,
             // Use ZIP64 DD when any entry field exceeds 32 bits, consistent with
             // CentralDirEntry::serialize() which also checks local_header_offset.
-            zip64: compressed_size > zip_format::U32_MAX
-                || self.uncompressed_size > zip_format::U32_MAX
-                || self.local_header_offset > zip_format::U32_MAX,
+            zip64: zip_format::entry_needs_zip64(
+                self.compressed_size,
+                self.uncompressed_size,
+                self.local_header_offset,
+            ),
         };
-        let dd_bytes = dd.serialize();
-        inner.write_all(&dd_bytes).await.map_err(|e| {
+        self.zip.scratch.clear();
+        dd.write_to(&mut self.zip.scratch);
+        inner.write_all(&self.zip.scratch).await.map_err(|e| {
             self.zip.poisoned = true;
             ZipError::Io(e)
         })?;
 
         // Update position tracker: compressed data + data descriptor
-        self.zip.pos += compressed_size + dd_bytes.len() as u64;
+        self.zip.pos += self.compressed_size + self.zip.scratch.len() as u64;
 
         let unix_mtime = zip_format::system_time_to_unix_secs(self.mtime);
 
         self.zip.entries.push(StoredEntry {
             name: self.name.clone(),
             crc32,
-            compressed_size,
+            compressed_size: self.compressed_size,
             uncompressed_size: self.uncompressed_size,
             local_header_offset: self.local_header_offset,
             is_directory: false,

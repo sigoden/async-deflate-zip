@@ -56,7 +56,7 @@ impl LocalFileHeader {
         }
     }
 
-    pub(crate) fn serialize(&self) -> Result<Vec<u8>, ZipError> {
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) -> Result<(), ZipError> {
         if self.name.len() > u16::MAX as usize {
             return Err(ZipError::FieldTooLong {
                 field: "LocalFileHeader filename",
@@ -71,21 +71,22 @@ impl LocalFileHeader {
                 max: u16::MAX as usize,
             });
         }
-        let mut buf = Vec::with_capacity(30 + self.name.len() + self.extra.len());
-        put_u32(&mut buf, LFH_SIG);
-        put_u16(&mut buf, self.version_needed);
-        put_u16(&mut buf, self.flags);
-        put_u16(&mut buf, self.method);
-        put_u16(&mut buf, self.time);
-        put_u16(&mut buf, self.date);
-        put_u32(&mut buf, 0);
-        put_u32(&mut buf, 0);
-        put_u32(&mut buf, 0);
-        put_u16(&mut buf, self.name.len() as u16);
-        put_u16(&mut buf, self.extra.len() as u16);
+        buf.clear();
+        buf.reserve(30 + self.name.len() + self.extra.len());
+        put_u32(buf, LFH_SIG);
+        put_u16(buf, self.version_needed);
+        put_u16(buf, self.flags);
+        put_u16(buf, self.method);
+        put_u16(buf, self.time);
+        put_u16(buf, self.date);
+        put_u32(buf, 0);
+        put_u32(buf, 0);
+        put_u32(buf, 0);
+        put_u16(buf, self.name.len() as u16);
+        put_u16(buf, self.extra.len() as u16);
         buf.extend_from_slice(&self.name);
         buf.extend_from_slice(&self.extra);
-        Ok(buf)
+        Ok(())
     }
 }
 
@@ -97,21 +98,20 @@ pub(crate) struct DataDescriptor {
 }
 
 impl DataDescriptor {
-    pub(crate) fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
+        buf.clear();
         if self.zip64 {
-            let mut buf = Vec::with_capacity(24);
-            put_u32(&mut buf, DD_SIG);
-            put_u32(&mut buf, self.crc32);
-            put_u64(&mut buf, self.compressed_size);
-            put_u64(&mut buf, self.uncompressed_size);
-            buf
+            buf.reserve(24);
+            put_u32(buf, DD_SIG);
+            put_u32(buf, self.crc32);
+            put_u64(buf, self.compressed_size);
+            put_u64(buf, self.uncompressed_size);
         } else {
-            let mut buf = Vec::with_capacity(16);
-            put_u32(&mut buf, DD_SIG);
-            put_u32(&mut buf, self.crc32);
-            put_u32(&mut buf, self.compressed_size as u32);
-            put_u32(&mut buf, self.uncompressed_size as u32);
-            buf
+            buf.reserve(16);
+            put_u32(buf, DD_SIG);
+            put_u32(buf, self.crc32);
+            put_u32(buf, self.compressed_size as u32);
+            put_u32(buf, self.uncompressed_size as u32);
         }
     }
 }
@@ -125,38 +125,42 @@ mod tests {
     #[test]
     fn test_lfh_normal_case() {
         let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, false, SystemTime::UNIX_EPOCH);
-        let data = lfh.serialize().unwrap();
-        assert_eq!(data.len(), 47);
-        assert_eq!(read_u32(&data, 0), LFH_SIG);
-        assert_eq!(read_u16(&data, 8), METHOD_DEFLATE);
-        assert!(data[6] & (1 << 3) != 0);
-        assert_eq!(read_u16(&data, 4), VERSION_DEFLATE);
-        assert_eq!(read_u16(&data, 28) as usize, 9);
+        let mut buf = Vec::new();
+        lfh.write_to(&mut buf).unwrap();
+        assert_eq!(buf.len(), 47);
+        assert_eq!(read_u32(&buf, 0), LFH_SIG);
+        assert_eq!(read_u16(&buf, 8), METHOD_DEFLATE);
+        assert!(buf[6] & (1 << 3) != 0);
+        assert_eq!(read_u16(&buf, 4), VERSION_DEFLATE);
+        assert_eq!(read_u16(&buf, 28) as usize, 9);
     }
 
     #[test]
     fn test_lfh_zip64_case() {
         let lfh = LocalFileHeader::new("bigfile.bin", METHOD_DEFLATE, true, SystemTime::UNIX_EPOCH);
-        let data = lfh.serialize().unwrap();
-        assert_eq!(read_u16(&data, 4), VERSION_ZIP64);
-        let name_len = read_u16(&data, 26) as usize;
-        let extra_len = read_u16(&data, 28) as usize;
+        let mut buf = Vec::new();
+        lfh.write_to(&mut buf).unwrap();
+        assert_eq!(read_u16(&buf, 4), VERSION_ZIP64);
+        let name_len = read_u16(&buf, 26) as usize;
+        let extra_len = read_u16(&buf, 28) as usize;
         assert_eq!(extra_len, 13);
         let extra_start = 30 + name_len;
-        let extra = &data[extra_start..extra_start + extra_len];
+        let extra = &buf[extra_start..extra_start + extra_len];
         assert_eq!(read_u16(extra, 0), 0x5455);
         assert_eq!(read_u16(extra, 9), 0x0001);
 
         let lfh = LocalFileHeader::new("bigdir", METHOD_STORED, true, SystemTime::UNIX_EPOCH);
-        let data = lfh.serialize().unwrap();
-        assert_eq!(read_u16(&data, 4), VERSION_ZIP64);
+        let mut buf = Vec::new();
+        lfh.write_to(&mut buf).unwrap();
+        assert_eq!(read_u16(&buf, 4), VERSION_ZIP64);
     }
 
     #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
         let lfh = LocalFileHeader::new(&name, METHOD_STORED, false, SystemTime::UNIX_EPOCH);
-        let result = lfh.serialize();
+        let mut buf = Vec::new();
+        let result = lfh.write_to(&mut buf);
         assert!(result.is_err());
         assert!(
             result
@@ -174,27 +178,29 @@ mod tests {
             uncompressed_size: 200,
             zip64: false,
         };
-        let data = dd.serialize();
-        assert_eq!(data.len(), 16);
-        assert_eq!(read_u32(&data, 0), DD_SIG);
-        assert_eq!(read_u32(&data, 4), 0x12345678);
-        assert_eq!(read_u32(&data, 8), 100);
-        assert_eq!(read_u32(&data, 12), 200);
+        let mut buf = Vec::new();
+        dd.write_to(&mut buf);
+        assert_eq!(buf.len(), 16);
+        assert_eq!(read_u32(&buf, 0), DD_SIG);
+        assert_eq!(read_u32(&buf, 4), 0x12345678);
+        assert_eq!(read_u32(&buf, 8), 100);
+        assert_eq!(read_u32(&buf, 12), 200);
     }
 
     #[test]
     fn test_dd_zip64_case() {
+        let mut buf = Vec::new();
         let dd = DataDescriptor {
             crc32: 0x12345678,
             compressed_size: 5_000_000_000,
             uncompressed_size: 10_000_000_000,
             zip64: true,
         };
-        let data = dd.serialize();
-        assert_eq!(data.len(), 24);
-        assert_eq!(read_u32(&data, 4), 0x12345678);
-        assert_eq!(read_u64(&data, 8), 5_000_000_000);
-        assert_eq!(read_u64(&data, 16), 10_000_000_000);
+        dd.write_to(&mut buf);
+        assert_eq!(buf.len(), 24);
+        assert_eq!(read_u32(&buf, 4), 0x12345678);
+        assert_eq!(read_u64(&buf, 8), 5_000_000_000);
+        assert_eq!(read_u64(&buf, 16), 10_000_000_000);
 
         let dd = DataDescriptor {
             crc32: 0xDEADBEEF,
@@ -202,10 +208,11 @@ mod tests {
             uncompressed_size: 200,
             zip64: true,
         };
-        let data = dd.serialize();
-        assert_eq!(data.len(), 24);
-        assert_eq!(read_u32(&data, 4), 0xDEADBEEF);
-        assert_eq!(read_u64(&data, 8), 100);
-        assert_eq!(read_u64(&data, 16), 200);
+        buf.clear();
+        dd.write_to(&mut buf);
+        assert_eq!(buf.len(), 24);
+        assert_eq!(read_u32(&buf, 4), 0xDEADBEEF);
+        assert_eq!(read_u64(&buf, 8), 100);
+        assert_eq!(read_u64(&buf, 16), 200);
     }
 }

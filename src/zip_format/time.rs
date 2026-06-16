@@ -1,8 +1,15 @@
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
+static LOCAL_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
+
+fn local_offset() -> time::UtcOffset {
+    *LOCAL_OFFSET
+        .get_or_init(|| time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+}
+
 pub(crate) fn system_time_to_ms_dos(t: SystemTime) -> (u16, u16) {
-    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-    let dt = time::OffsetDateTime::from(t).to_offset(local_offset);
+    let dt = time::OffsetDateTime::from(t).to_offset(local_offset());
     let y = dt.year().clamp(1980, 2107);
     let m = u8::from(dt.month()) as u16;
     let day = dt.day() as u16;

@@ -30,7 +30,6 @@
 //! ```
 
 mod compression;
-mod count_writer;
 mod deflate_encoder;
 mod error;
 mod validate;

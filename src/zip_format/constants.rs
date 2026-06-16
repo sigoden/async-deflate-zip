@@ -37,5 +37,28 @@ pub(crate) const VERSION_ZIP64: u16 = 45;
 /// Maximum value that fits in a ZIP 32-bit size/offset field.
 pub(crate) const U32_MAX: u64 = u32::MAX as u64;
 
+/// Maximum entries that fit in a 16-bit EOCDR field.
+pub(crate) const U16_ENTRY_MAX: u64 = 0xFFFF;
+
+/// Whether an individual entry needs ZIP64 extensions.
+///
+/// ZIP64 is required when any of the three 32-bit fields (compressed size,
+/// uncompressed size, local header offset) exceeds `U32_MAX`.
+pub(crate) const fn entry_needs_zip64(
+    compressed_size: u64,
+    uncompressed_size: u64,
+    local_header_offset: u64,
+) -> bool {
+    compressed_size > U32_MAX || uncompressed_size > U32_MAX || local_header_offset > U32_MAX
+}
+
+/// Whether the archive itself needs ZIP64 records (Zip64Eocdr + Locator).
+///
+/// ZIP64 is required when the total entry count exceeds 0xFFFF, or the
+/// Central Directory size or offset exceeds `U32_MAX`.
+pub(crate) const fn archive_needs_zip64(total_entries: u64, cd_size: u64, cd_offset: u64) -> bool {
+    total_entries > U16_ENTRY_MAX || cd_size > U32_MAX || cd_offset > U32_MAX
+}
+
 /// Data Descriptor signature: `PK\x07\x08` (`0x08074b50`).
 pub(crate) const DD_SIG: u32 = 0x08074b50;

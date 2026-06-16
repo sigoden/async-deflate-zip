@@ -1,15 +1,24 @@
-/// Compression level for deflate entries.
+/// Compression level for entries.
 ///
 /// Maps to standard zlib compression levels 0–9:
-/// - [`none()`](Self::none)   → level 0 (store only, no compression)
-/// - [`fast()`](Self::fast)   → level 1 (fastest compression)
-/// - [`default()`](Self::default) → level 6 (default)
-/// - [`best()`](Self::best)   → level 9 (maximum compression)
+/// - [`none()`](Self::none)   → level 0 (ZIP **stored**, no deflate compression)
+/// - [`fast()`](Self::fast)   → level 1 (fastest deflate compression)
+/// - [`default()`](Self::default) → level 6 (default deflate compression)
+/// - [`best()`](Self::best)   → level 9 (maximum deflate compression)
+///
+/// Level 0 is special: it bypasses the deflate encoder entirely and stores the
+/// entry data verbatim (ZIP method 0 — stored), rather than running deflate at
+/// level 0. This means stored entries are neither compressed nor wrapped in a
+/// deflate frame, which is the correct behavior for the ZIP format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompressionLevel(u8);
 
 impl CompressionLevel {
-    /// Level 0: store only, no compression.
+    /// Level 0: ZIP **stored** (no deflate compression at all).
+    ///
+    /// Unlike levels 1–9, this bypasses the deflate encoder entirely. Entry
+    /// data is written as-is with ZIP method 0 (stored), not wrapped in a
+    /// deflate frame.
     pub const fn none() -> Self {
         CompressionLevel(0)
     }

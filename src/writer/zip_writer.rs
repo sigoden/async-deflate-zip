@@ -1,7 +1,6 @@
 use super::entry_options::EntryOptions;
 use super::entry_writer::EntryWriter;
 use super::stored_entry::StoredEntry;
-use crate::zip_format::sanitize_path;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
@@ -143,7 +142,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         name: &str,
         options: &EntryOptions,
     ) -> Result<EntryWriter<'a, W>, ZipError> {
-        let name = sanitize_path(name);
+        let name = sanitize_entry_name(name)?;
+        if name.ends_with('/') {
+            return Err(ZipError::InvalidInput {
+                reason: "file entry name must not end with '/', use add_directory for directories",
+            });
+        }
         validate_input(&name, options.comment())?;
 
         let mut inner = self.take_inner()?;
@@ -155,9 +159,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_DEFLATE
         };
 
-        let needs_zip64 = self.pos > zip_format::U32_MAX;
-        let lfh =
-            zip_format::LocalFileHeader::new(&name, method, needs_zip64, *options.mtime(), true);
+        let lfh = zip_format::LocalFileHeader::new(&name, method, *options.mtime(), true);
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;
         inner.write_all(&self.scratch).await?;
@@ -179,7 +181,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             uncompressed_size: 0,
             compressed_size: 0,
             local_header_offset: offset,
-            name: name.into_owned(),
+            name,
             mtime: *options.mtime(),
             unix_permissions: options.unix_permissions(),
             uid_gid: options.uid_gid(),
@@ -283,7 +285,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         name: &str,
         options: &EntryOptions,
     ) -> Result<(), ZipError> {
-        let mut name = sanitize_path(name).into_owned();
+        let mut name = sanitize_entry_name(name)?;
         if !name.ends_with('/') {
             name.push('/');
         }
@@ -291,11 +293,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let mut inner = self.take_inner()?;
 
-        let needs_zip64 = self.pos > zip_format::U32_MAX;
         let lfh = zip_format::LocalFileHeader::new(
             &name,
             zip_format::METHOD_STORED,
-            needs_zip64,
             *options.mtime(),
             false,
         );
@@ -358,16 +358,14 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         target: &str,
         options: &EntryOptions,
     ) -> Result<(), ZipError> {
-        let name = sanitize_path(name).into_owned();
+        let name = sanitize_entry_name(name)?;
         validate_input(&name, options.comment())?;
 
         let mut inner = self.take_inner()?;
 
-        let needs_zip64 = self.pos > zip_format::U32_MAX;
         let lfh = zip_format::LocalFileHeader::new(
             &name,
             zip_format::METHOD_STORED,
-            needs_zip64,
             *options.mtime(),
             true,
         );
@@ -509,6 +507,16 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     }
 }
 
+fn sanitize_entry_name(name: &str) -> Result<String, ZipError> {
+    let name = name.replace('\\', "/");
+    if name.is_empty() {
+        return Err(ZipError::InvalidInput {
+            reason: "entry name is empty",
+        });
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +635,42 @@ mod tests {
         assert!(
             buf.windows(4).any(|w| w == b"PK\x07\x08"),
             "first entry should have DD signature"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zip64_eocd_chain_large_offset() {
+        // Simulate an archive where cd_offset exceeds U32_MAX
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf).with_compression_level(CompressionLevel::none());
+        let mut entry = zip
+            .start_file("f.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(b"x").await.unwrap();
+        entry.finish().await.unwrap();
+
+        // Bump pos so that cd_offset triggers Zip64 EOCD
+        zip.pos = zip_format::U32_MAX + 1;
+
+        zip.finish().await.unwrap();
+
+        let eocdr_pos = buf.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        assert_eq!(
+            &buf[eocdr_pos + 16..eocdr_pos + 20],
+            u32::MAX.to_le_bytes(),
+            "EOCDR cd_offset should be sentinel 0xFFFFFFFF for ZIP64"
+        );
+
+        let locator_pos = buf.windows(4).rposition(|w| w == b"PK\x06\x07").unwrap();
+        assert_eq!(&buf[locator_pos..locator_pos + 4], b"PK\x06\x07");
+
+        let z64_pos = buf.windows(4).rposition(|w| w == b"PK\x06\x06").unwrap();
+        assert_eq!(&buf[z64_pos..z64_pos + 4], b"PK\x06\x06");
+
+        assert!(
+            z64_pos < locator_pos && locator_pos < eocdr_pos,
+            "expected Zip64Eocdr < Zip64EocdrLocator < Eocdr"
         );
     }
 

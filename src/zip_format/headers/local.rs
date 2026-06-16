@@ -17,13 +17,7 @@ pub(crate) struct LocalFileHeader {
 }
 
 impl LocalFileHeader {
-    pub(crate) fn new(
-        name: &str,
-        method: u16,
-        zip64: bool,
-        mtime: SystemTime,
-        use_data_desc: bool,
-    ) -> Self {
+    pub(crate) fn new(name: &str, method: u16, mtime: SystemTime, use_data_desc: bool) -> Self {
         let (time, date) = system_time_to_ms_dos(mtime);
         let mut flags = if use_data_desc { FLAG_DATA_DESC } else { 0 };
         if !name.is_ascii() {
@@ -34,14 +28,10 @@ impl LocalFileHeader {
             .unwrap_or_default()
             .as_secs();
         Self {
-            version_needed: if zip64 {
-                VERSION_ZIP64
-            } else {
-                match method {
-                    METHOD_STORED => VERSION_STORED,
-                    METHOD_DEFLATE => VERSION_DEFLATE,
-                    _ => VERSION_DEFLATE,
-                }
+            version_needed: match method {
+                METHOD_STORED => VERSION_STORED,
+                METHOD_DEFLATE => VERSION_DEFLATE,
+                _ => VERSION_DEFLATE,
             },
             flags,
             method,
@@ -50,9 +40,8 @@ impl LocalFileHeader {
             name: name.as_bytes().to_vec(),
             extra: {
                 let mut extra = Vec::new();
-                ExtendedTimestampExtra::new(unix_secs).serialize(&mut extra);
-                if zip64 {
-                    Zip64Extra::LocalFileHeader.serialize(&mut extra);
+                if unix_secs != 0 {
+                    ExtendedTimestampExtra::new(unix_secs).serialize(&mut extra);
                 }
                 extra
             },
@@ -127,60 +116,25 @@ mod tests {
 
     #[test]
     fn test_lfh_normal_case() {
-        let lfh = LocalFileHeader::new(
-            "test.txt",
-            METHOD_DEFLATE,
-            false,
-            SystemTime::UNIX_EPOCH,
-            true,
-        );
+        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, SystemTime::UNIX_EPOCH, true);
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
-        assert_eq!(buf.len(), 47);
+        assert_eq!(buf.len(), 38);
         assert_eq!(read_u32(&buf, 0), LFH_SIG);
         assert_eq!(read_u16(&buf, 8), METHOD_DEFLATE);
         assert!(buf[6] & (1 << 3) != 0);
         assert_eq!(read_u16(&buf, 4), VERSION_DEFLATE);
-        assert_eq!(read_u16(&buf, 28) as usize, 9);
+        assert_eq!(read_u32(&buf, 18), 0);
+        assert_eq!(read_u32(&buf, 22), 0);
+        assert_eq!(read_u16(&buf, 28) as usize, 0);
     }
 
     #[test]
     fn test_lfh_no_data_desc() {
-        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, false, SystemTime::UNIX_EPOCH, false);
+        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, SystemTime::UNIX_EPOCH, false);
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
-        assert_eq!(buf.len(), 43);
-        assert!(
-            buf[6] & (1 << 3) == 0,
-            "bit 3 should be 0 for directory entries"
-        );
-    }
-
-    #[test]
-    fn test_lfh_zip64_case() {
-        let lfh = LocalFileHeader::new(
-            "bigfile.bin",
-            METHOD_DEFLATE,
-            true,
-            SystemTime::UNIX_EPOCH,
-            true,
-        );
-        let mut buf = Vec::new();
-        lfh.write_to(&mut buf).unwrap();
-        assert_eq!(read_u16(&buf, 4), VERSION_ZIP64);
-        let name_len = read_u16(&buf, 26) as usize;
-        let extra_len = read_u16(&buf, 28) as usize;
-        assert_eq!(extra_len, 13);
-        let extra_start = 30 + name_len;
-        let extra = &buf[extra_start..extra_start + extra_len];
-        assert_eq!(read_u16(extra, 0), 0x5455);
-        assert_eq!(read_u16(extra, 9), 0x0001);
-
-        let lfh =
-            LocalFileHeader::new("bigdir", METHOD_STORED, true, SystemTime::UNIX_EPOCH, false);
-        let mut buf = Vec::new();
-        lfh.write_to(&mut buf).unwrap();
-        assert_eq!(read_u16(&buf, 4), VERSION_ZIP64);
+        assert_eq!(buf.len(), 34);
         assert!(
             buf[6] & (1 << 3) == 0,
             "bit 3 should be 0 for directory entries"
@@ -190,7 +144,7 @@ mod tests {
     #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, METHOD_STORED, false, SystemTime::UNIX_EPOCH, true);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, SystemTime::UNIX_EPOCH, true);
         let mut buf = Vec::new();
         let result = lfh.write_to(&mut buf);
         assert!(result.is_err());

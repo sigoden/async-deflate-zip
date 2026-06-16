@@ -48,33 +48,18 @@ impl ExtraField for UnixUidGidExtra {
     }
 }
 
-pub(crate) enum Zip64Extra {
-    LocalFileHeader,
-    CentralDirectory {
-        uncompressed_size: u64,
-        compressed_size: u64,
-        offset: u64,
-    },
+pub(crate) struct Zip64Extra {
+    pub(crate) uncompressed_size: u64,
+    pub(crate) compressed_size: u64,
+    pub(crate) offset: u64,
 }
 
 impl ExtraField for Zip64Extra {
     fn serialize(&self, buf: &mut Vec<u8>) {
-        match self {
-            Zip64Extra::LocalFileHeader => {
-                put_u16(buf, 0x0001);
-                put_u16(buf, 0);
-            }
-            Zip64Extra::CentralDirectory {
-                uncompressed_size,
-                compressed_size,
-                offset,
-            } => {
-                put_u16(buf, 0x0001);
-                put_u16(buf, 24);
-                put_u64(buf, *uncompressed_size);
-                put_u64(buf, *compressed_size);
-                put_u64(buf, *offset);
-            }
-        }
+        put_u16(buf, 0x0001);
+        put_u16(buf, 24);
+        put_u64(buf, self.uncompressed_size);
+        put_u64(buf, self.compressed_size);
+        put_u64(buf, self.offset);
     }
 }

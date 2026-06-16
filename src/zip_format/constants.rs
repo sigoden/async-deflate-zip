@@ -28,7 +28,7 @@ pub(crate) const VERSION_STORED: u16 = 10;
 /// Version needed: 2.0 (20) — supports DEFLATE compression.
 pub(crate) const VERSION_DEFLATE: u16 = 20;
 
-/// Version made by: Unix host OS (upper byte = 3) + version 3.0 (lower byte = 30).
+/// Version made by: Unix host OS (upper byte = 3) + version 3.0 (lower byte = 30, industry standard).
 pub(crate) const VERSION_UNIX: u16 = (3 << 8) | 30;
 
 /// Version needed: 4.5 — supports ZIP64 extensions.

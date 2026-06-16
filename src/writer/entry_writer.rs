@@ -1,10 +1,10 @@
-use super::helpers::CountWriter;
 use super::stored_entry::StoredEntry;
 use super::zip_writer::ZipWriter;
+use crate::count_writer::CountWriter;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
-use crate::header;
+use crate::zip_format;
 
 use std::io;
 use std::pin::Pin;
@@ -118,15 +118,15 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
 
         let crc32 = self.crc_hasher.clone().finalize();
 
-        let dd = header::DataDescriptor {
+        let dd = zip_format::DataDescriptor {
             crc32,
             compressed_size,
             uncompressed_size: self.uncompressed_size,
             // Use ZIP64 DD when any entry field exceeds 32 bits, consistent with
             // CentralDirEntry::serialize() which also checks local_header_offset.
-            zip64: compressed_size > header::U32_MAX
-                || self.uncompressed_size > header::U32_MAX
-                || self.local_header_offset > header::U32_MAX,
+            zip64: compressed_size > zip_format::U32_MAX
+                || self.uncompressed_size > zip_format::U32_MAX
+                || self.local_header_offset > zip_format::U32_MAX,
         };
         let dd_bytes = dd.serialize();
         inner.write_all(&dd_bytes).await.map_err(|e| {
@@ -137,7 +137,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
         // Update position tracker: compressed data + data descriptor
         self.zip.pos += compressed_size + dd_bytes.len() as u64;
 
-        let (mtime_msdos, unix_mtime) = header::mtime_to_ms_dos_and_unix(self.mtime);
+        let (mtime_msdos, unix_mtime) = zip_format::mtime_to_ms_dos_and_unix(self.mtime);
 
         self.zip.entries.push(StoredEntry {
             name: self.name.clone(),

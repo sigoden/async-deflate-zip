@@ -29,10 +29,11 @@
 //! # }
 //! ```
 
+mod count_writer;
 mod deflate_encoder;
 mod error;
-mod header;
 mod writer;
+mod zip_format;
 
 pub use error::ZipError;
 pub type CompressionLevel = flate2::Compression;

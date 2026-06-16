@@ -1,6 +1,5 @@
 mod entry_options;
 mod entry_writer;
-mod helpers;
 mod stored_entry;
 mod zip_writer;
 

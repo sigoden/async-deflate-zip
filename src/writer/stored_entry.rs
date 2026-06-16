@@ -1,4 +1,5 @@
-use crate::header;
+use crate::zip_format;
+use crate::zip_format::ExtraField;
 
 pub(crate) struct StoredEntry {
     pub(crate) name: String,
@@ -17,25 +18,24 @@ pub(crate) struct StoredEntry {
 }
 
 impl StoredEntry {
-    pub(crate) fn to_central_dir_entry(&self) -> header::CentralDirEntry {
+    pub(crate) fn to_central_dir_entry(&self) -> zip_format::CentralDirEntry {
         let (time, date) = self.mtime;
 
         let has_unix_attrs =
             self.unix_permissions.is_some() || self.is_symlink || self.unix_mtime != 0;
         let version_made_by = if has_unix_attrs {
-            header::VERSION_UNIX
+            zip_format::VERSION_UNIX
         } else {
-            header::VERSION_DEFLATE
+            zip_format::VERSION_DEFLATE
         };
 
-        let mut extra = if !self.name.is_ascii() {
-            header::build_unicode_extra_field(&self.name)
-        } else {
-            Vec::new()
-        };
-        extra.extend(header::build_extended_timestamp_extra(self.unix_mtime));
+        let mut extra = Vec::new();
+        if !self.name.is_ascii() {
+            zip_format::UnicodePathExtra::new(&self.name).serialize(&mut extra);
+        }
+        zip_format::ExtendedTimestampExtra::new(self.unix_mtime).serialize(&mut extra);
         if let Some((uid, gid)) = self.uid_gid {
-            extra.extend(header::build_unix_uid_gid_extra(uid, gid));
+            zip_format::UnixUidGidExtra::new(uid, gid).serialize(&mut extra);
         }
 
         let file_type_bit: u32 = if self.is_symlink {
@@ -55,29 +55,29 @@ impl StoredEntry {
             (None, false) => 0,
         };
 
-        let use_zip64 = self.compressed_size > header::U32_MAX
-            || self.uncompressed_size > header::U32_MAX
-            || self.local_header_offset > header::U32_MAX;
+        let use_zip64 = self.compressed_size > zip_format::U32_MAX
+            || self.uncompressed_size > zip_format::U32_MAX
+            || self.local_header_offset > zip_format::U32_MAX;
 
-        let mut flags = header::FLAG_DATA_DESC;
+        let mut flags = zip_format::FLAG_DATA_DESC;
         if !self.name.is_ascii() {
             flags |= 1 << 11; // EFS / UTF-8 flag (bit 11), consistent with LocalFileHeader::new()
         }
 
-        header::CentralDirEntry {
+        zip_format::CentralDirEntry {
             version_made_by,
             version_needed: if use_zip64 {
-                header::VERSION_ZIP64
+                zip_format::VERSION_ZIP64
             } else if self.is_directory || self.is_symlink || self.is_stored {
-                header::VERSION_STORED
+                zip_format::VERSION_STORED
             } else {
-                header::VERSION_DEFLATE
+                zip_format::VERSION_DEFLATE
             },
             flags,
             method: if self.is_directory || self.is_symlink || self.is_stored {
-                header::METHOD_STORED
+                zip_format::METHOD_STORED
             } else {
-                header::METHOD_DEFLATE
+                zip_format::METHOD_DEFLATE
             },
             time,
             date,
@@ -96,7 +96,7 @@ impl StoredEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header;
+    use crate::zip_format;
 
     fn default_entry() -> StoredEntry {
         StoredEntry {
@@ -131,9 +131,9 @@ mod tests {
 
         assert_eq!(cd.name, b"file.txt");
         assert_eq!(cd.crc32, 0x12345678);
-        assert_eq!(cd.method, header::METHOD_STORED);
-        assert_eq!(cd.version_needed, header::VERSION_STORED);
-        assert_eq!(cd.version_made_by, header::VERSION_DEFLATE);
+        assert_eq!(cd.method, zip_format::METHOD_STORED);
+        assert_eq!(cd.version_needed, zip_format::VERSION_STORED);
+        assert_eq!(cd.version_made_by, zip_format::VERSION_DEFLATE);
         assert_eq!(
             cd.extra.len(),
             9,
@@ -158,9 +158,9 @@ mod tests {
 
         let cd = entry.to_central_dir_entry();
 
-        assert_eq!(cd.method, header::METHOD_STORED);
-        assert_eq!(cd.version_needed, header::VERSION_STORED);
-        assert_eq!(cd.version_made_by, header::VERSION_UNIX);
+        assert_eq!(cd.method, zip_format::METHOD_STORED);
+        assert_eq!(cd.version_needed, zip_format::VERSION_STORED);
+        assert_eq!(cd.version_made_by, zip_format::VERSION_UNIX);
         let attrs = cd.external_file_attributes;
         assert_eq!(
             attrs >> 16,
@@ -187,9 +187,9 @@ mod tests {
 
         let cd = entry.to_central_dir_entry();
 
-        assert_eq!(cd.method, header::METHOD_STORED);
-        assert_eq!(cd.version_needed, header::VERSION_STORED);
-        assert_eq!(cd.version_made_by, header::VERSION_UNIX);
+        assert_eq!(cd.method, zip_format::METHOD_STORED);
+        assert_eq!(cd.version_needed, zip_format::VERSION_STORED);
+        assert_eq!(cd.version_made_by, zip_format::VERSION_UNIX);
         let attrs = cd.external_file_attributes;
         assert_eq!(
             attrs >> 16,
@@ -221,8 +221,8 @@ mod tests {
 
         let cd = entry.to_central_dir_entry();
 
-        assert_eq!(cd.version_made_by, header::VERSION_UNIX);
-        assert_eq!(cd.method, header::METHOD_STORED);
+        assert_eq!(cd.version_made_by, zip_format::VERSION_UNIX);
+        assert_eq!(cd.method, zip_format::METHOD_STORED);
         assert_eq!(cd.crc32, 0xDEADBEEF);
         assert_eq!(cd.compressed_size, 50);
         assert_eq!(cd.uncompressed_size, 50);
@@ -248,9 +248,9 @@ mod tests {
     fn test_to_central_dir_entry_zip64() {
         let entry = StoredEntry {
             name: "big.bin".to_string(),
-            compressed_size: header::U32_MAX + 1,
-            uncompressed_size: header::U32_MAX + 1,
-            local_header_offset: header::U32_MAX + 1,
+            compressed_size: zip_format::U32_MAX + 1,
+            uncompressed_size: zip_format::U32_MAX + 1,
+            local_header_offset: zip_format::U32_MAX + 1,
             ..default_entry()
         };
 
@@ -258,9 +258,9 @@ mod tests {
 
         assert_eq!(
             cd.version_needed,
-            header::VERSION_ZIP64,
+            zip_format::VERSION_ZIP64,
             "version_needed should be VERSION_ZIP64 (20) for entries needing ZIP64"
         );
-        assert_eq!(cd.method, header::METHOD_DEFLATE);
+        assert_eq!(cd.method, zip_format::METHOD_DEFLATE);
     }
 }

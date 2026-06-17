@@ -25,11 +25,11 @@ pub enum ZipError {
         reason: &'static str,
     },
 
-    /// The writer is in a corrupted state (e.g. entry dropped without finish).
-    EntryWriterCorrupted,
+    /// An entry writer is still active; finish it before starting another.
+    WriterBusy,
 
-    /// An entry writer is already active; finish it before starting another.
-    WriterCorrupted,
+    /// The writer is in a poisoned state (e.g. entry dropped without finish).
+    Poisoned,
 }
 
 impl fmt::Display for ZipError {
@@ -40,8 +40,10 @@ impl fmt::Display for ZipError {
                 write!(f, "{field} too long: {len} bytes (max {max})")
             }
             Self::InvalidInput { reason } => write!(f, "invalid input: {reason}"),
-            Self::EntryWriterCorrupted => write!(f, "entry writer corrupted"),
-            Self::WriterCorrupted => write!(f, "writer corrupted"),
+            Self::WriterBusy => write!(f, "an entry writer is still active"),
+            Self::Poisoned => {
+                write!(f, "writer is poisoned (entry dropped without finish)")
+            }
         }
     }
 }
@@ -68,8 +70,7 @@ impl From<ZipError> for io::Error {
             ZipError::FieldTooLong { .. } | ZipError::InvalidInput { .. } => {
                 io::Error::new(io::ErrorKind::InvalidInput, err)
             }
-            ZipError::EntryWriterCorrupted => io::Error::other(err),
-            ZipError::WriterCorrupted => io::Error::other(err),
+            ZipError::WriterBusy | ZipError::Poisoned => io::Error::other(err),
         }
     }
 }

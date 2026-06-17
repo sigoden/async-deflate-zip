@@ -104,9 +104,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     fn take_inner(&mut self) -> Result<W, ZipError> {
         self.inner.take().ok_or({
             if self.poisoned {
-                ZipError::EntryWriterCorrupted
+                ZipError::Poisoned
             } else {
-                ZipError::WriterCorrupted
+                ZipError::WriterBusy
             }
         })
     }
@@ -119,7 +119,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if writer is poisoned, or if writing the
+    /// Returns [`ZipError`] if the writer is poisoned, or if writing the
     /// Local File Header fails (I/O error or field too long).
     ///
     /// # Example
@@ -266,7 +266,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if writer is poisoned, or if writing fails.
+    /// Returns [`ZipError`] if the writer is poisoned, or if writing fails.
     ///
     /// # Example
     ///
@@ -336,7 +336,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if writer is poisoned, or if writing the
+    /// Returns [`ZipError`] if the writer is poisoned, or if writing the
     /// Local File Header, symlink target, or Data Descriptor fails (I/O error
     /// or field too long).
     ///
@@ -494,15 +494,15 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError::WriterCorrupted`] if an [`EntryWriter`] is still
-    /// active (the inner writer has been moved into that entry), or
-    /// [`ZipError::EntryWriterCorrupted`] if the writer is in a poisoned
-    /// state (an entry was dropped without finishing).
+    /// Returns [`ZipError::WriterBusy`] if an [`EntryWriter`] is still active
+    /// (the inner writer has been moved into that entry), or
+    /// [`ZipError::Poisoned`] if the writer is in a poisoned state (an entry
+    /// was dropped without finishing).
     pub fn abort(self) -> Result<W, ZipError> {
         self.inner.ok_or(if self.poisoned {
-            ZipError::EntryWriterCorrupted
+            ZipError::Poisoned
         } else {
-            ZipError::WriterCorrupted
+            ZipError::WriterBusy
         })
     }
 }

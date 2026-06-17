@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Dispatch an `AsyncWrite` method to the active writer (stored or deflated).
-/// Returns `EntryWriterCorrupted` error if the entry has already been closed.
+/// Returns `Poisoned` if the entry writer has already been finished.
 macro_rules! poll_active_writer {
     ($this:expr, $cx:expr, $method:ident $(, $args:expr)*) => {{
         let writer: Option<Pin<&mut dyn AsyncWrite>> = if *$this.is_stored {
@@ -28,7 +28,7 @@ macro_rules! poll_active_writer {
             Some(mut w) => w.as_mut().$method($cx $(, $args)*),
             None => {
                 $this.zip.poisoned = true;
-                Poll::Ready(Err(io::Error::other(ZipError::EntryWriterCorrupted)))
+                Poll::Ready(Err(io::Error::other(ZipError::Poisoned)))
             }
         }
     }};
@@ -99,14 +99,9 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
     pub async fn finish(mut self) -> Result<(), ZipError> {
         let mut inner = if self.is_stored {
             self.compressed_size = self.uncompressed_size;
-            self.passthrough
-                .take()
-                .ok_or(ZipError::EntryWriterCorrupted)?
+            self.passthrough.take().ok_or(ZipError::Poisoned)?
         } else {
-            let mut encoder = self
-                .deflate_encoder
-                .take()
-                .ok_or(ZipError::EntryWriterCorrupted)?;
+            let mut encoder = self.deflate_encoder.take().ok_or(ZipError::Poisoned)?;
             encoder.shutdown().await?;
             self.compressed_size = encoder.written();
             encoder.into_inner()
@@ -273,8 +268,8 @@ mod tests {
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.err().unwrap();
         assert!(
-            matches!(err, ZipError::EntryWriterCorrupted),
-            "expected EntryWriterCorrupted, got: {err}"
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned, got: {err}"
         );
     }
 
@@ -291,8 +286,8 @@ mod tests {
 
         let err = zip.finish().await.unwrap_err();
         assert!(
-            matches!(err, ZipError::EntryWriterCorrupted),
-            "expected EntryWriterCorrupted, got: {err}"
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned, got: {err}"
         );
     }
 }

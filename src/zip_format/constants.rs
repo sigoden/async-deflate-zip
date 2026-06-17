@@ -40,6 +40,26 @@ pub(crate) const U32_MAX: u64 = u32::MAX as u64;
 /// Maximum entries that fit in a 16-bit EOCDR field.
 pub(crate) const U16_ENTRY_MAX: u64 = 0xFFFF;
 
+/// Default Unix permissions for regular files.
+pub(crate) const DEFAULT_FILE_PERM: u32 = 0o644;
+
+/// Default Unix permissions for directories.
+pub(crate) const DEFAULT_DIR_PERM: u32 = 0o755;
+
+/// Default Unix permissions for symlink files.
+pub(crate) const DEFAULT_SYMLINK_PERM: u32 = 0o777;
+
+/// Whether a data descriptor needs ZIP64 extensions.
+///
+/// ZIP64 is required when compressed or uncompressed size exceeds `U32_MAX`.
+/// Unlike entry headers, data descriptors do not carry a local header offset.
+pub(crate) const fn data_descriptor_needs_zip64(
+    compressed_size: u64,
+    uncompressed_size: u64,
+) -> bool {
+    compressed_size > U32_MAX || uncompressed_size > U32_MAX
+}
+
 /// Whether an individual entry needs ZIP64 extensions.
 ///
 /// ZIP64 is required when any of the three 32-bit fields (compressed size,

@@ -118,12 +118,9 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             crc32,
             compressed_size: self.compressed_size,
             uncompressed_size: self.uncompressed_size,
-            // Use ZIP64 DD when any entry field exceeds 32 bits, consistent with
-            // CentralDirEntry::serialize() which also checks local_header_offset.
-            zip64: zip_format::entry_needs_zip64(
+            zip64: zip_format::data_descriptor_needs_zip64(
                 self.compressed_size,
                 self.uncompressed_size,
-                self.local_header_offset,
             ),
         };
         self.zip.scratch.clear();
@@ -213,9 +210,8 @@ mod tests {
         entry.finish().await.unwrap();
         zip.finish().await.unwrap();
 
-        let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
         let local_epoch =
-            time::OffsetDateTime::from(SystemTime::UNIX_EPOCH).to_offset(local_offset);
+            time::OffsetDateTime::from(SystemTime::UNIX_EPOCH).to_offset(time::UtcOffset::UTC);
 
         assert_last_modified(
             &buf,

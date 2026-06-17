@@ -53,12 +53,15 @@ impl StoredEntry {
         };
         let external_file_attributes = match (self.unix_permissions, self.is_symlink) {
             (Some(mode), _) => (mode | file_type_bit) << 16,
-            (None, true) => file_type_bit << 16,
-            (None, false) if self.unix_mtime != 0 => {
-                let default_mode = if self.is_directory { 0o755 } else { 0o644 };
+            (None, true) => (zip_format::DEFAULT_SYMLINK_PERM | file_type_bit) << 16,
+            (None, false) => {
+                let default_mode = if self.is_directory {
+                    zip_format::DEFAULT_DIR_PERM
+                } else {
+                    zip_format::DEFAULT_FILE_PERM
+                };
                 (default_mode | file_type_bit) << 16
             }
-            (None, false) => 0,
         };
 
         let mut flags = if self.is_directory {
@@ -192,8 +195,8 @@ mod tests {
         let attrs = cd.external_file_attributes;
         assert_eq!(
             attrs >> 16,
-            0o120000,
-            "expected S_IFLNK, got {:06o}",
+            0o120777,
+            "expected S_IFLNK + 0o777, got {:06o}",
             attrs >> 16
         );
         assert!(

@@ -390,7 +390,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             crc32,
             compressed_size: data_size,
             uncompressed_size: data_size,
-            zip64: zip_format::entry_needs_zip64(data_size, data_size, offset),
+            zip64: zip_format::data_descriptor_needs_zip64(data_size, data_size),
         };
         self.scratch.clear();
         dd.write_to(&mut self.scratch);
@@ -466,7 +466,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             self.scratch.clear();
             locator.write_to(&mut self.scratch);
             inner.write_all(&self.scratch).await?;
-            self.pos += 20;
+            self.pos += self.scratch.len() as u64;
         }
 
         if let Some(ref comment) = self.comment {

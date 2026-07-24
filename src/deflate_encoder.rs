@@ -130,10 +130,6 @@ impl<W: AsyncWrite + Unpin> DeflateEncoder<W> {
         self.out_pos = 0;
         self.out_len = produced;
 
-        if matches!(status, Status::BufError) && consumed == 0 && produced == 0 {
-            return Err(io::Error::other("flate2 BufError with no progress"));
-        }
-
         Ok((consumed, status))
     }
 }
@@ -220,20 +216,16 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
         }
 
         // Flush compressor internal state
-        loop {
+        let produced = {
             let this = self.as_mut().get_mut();
-            let (_, status) = this.do_compress(&[], FlushCompress::Sync)?;
+            this.do_compress(&[], FlushCompress::Sync)?;
+            this.out_len
+        };
 
-            if this.out_pos < this.out_len {
-                match self.as_mut().poll_drain(cx) {
-                    Poll::Ready(Ok(())) => {}
-                    other => return other,
-                }
-            }
-
-            match status {
-                Status::Ok | Status::StreamEnd => break,
-                Status::BufError => continue,
+        if produced > 0 {
+            match self.as_mut().poll_drain(cx) {
+                Poll::Ready(Ok(())) => {}
+                other => return other,
             }
         }
 
@@ -254,10 +246,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
 
             // Finish deflate stream (write end-of-stream markers)
             loop {
-                let this = self.as_mut().get_mut();
-                let (_, status) = this.do_compress(&[], FlushCompress::Finish)?;
+                let (status, produced) = {
+                    let this = self.as_mut().get_mut();
+                    let (_, status) = this.do_compress(&[], FlushCompress::Finish)?;
+                    (status, this.out_len)
+                };
 
-                if this.out_pos < this.out_len {
+                if produced > 0 {
                     match self.as_mut().poll_drain(cx) {
                         Poll::Ready(Ok(())) => {}
                         other => return other,
@@ -266,7 +261,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
 
                 match status {
                     Status::StreamEnd => break,
-                    Status::Ok | Status::BufError => continue,
+                    Status::Ok => continue,
+                    Status::BufError if produced > 0 => continue,
+                    Status::BufError => break,
                 }
             }
 

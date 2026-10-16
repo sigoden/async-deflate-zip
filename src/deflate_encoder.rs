@@ -177,12 +177,21 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
 
             // Drain the compressed output (if any) to the inner writer.
             // If the inner writer would block, surface Pending so the caller
-            // can retry later.
+            // can retry later — but only when we have not already consumed
+            // input this round. Otherwise the caller would retry with the same
+            // buffer and the compressor would consume (and emit) those bytes
+            // twice, corrupting the deflate stream. The undrained output stays
+            // buffered in `out_buf`; the next call drains it first.
             if self.out_pos < self.out_len {
                 match self.as_mut().poll_drain(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        if consumed > 0 {
+                            return Poll::Ready(Ok(consumed));
+                        }
+                        return Poll::Pending;
+                    }
                 }
             }
 
@@ -431,5 +440,87 @@ mod tests {
             !encoder.get_ref().data.is_empty(),
             "compressed data should be available"
         );
+    }
+
+    /// A writer that returns `Pending` on the `pending_on_call`-th
+    /// `poll_write` (1-based), then succeeds on the retry.
+    struct FlakyWriter {
+        data: Vec<u8>,
+        calls: usize,
+        pending_on_call: usize,
+    }
+
+    impl AsyncWrite for FlakyWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.calls += 1;
+            if self.calls == self.pending_on_call {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.data.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Regression: when the inner writer applies backpressure, the encoder
+    /// must not return `Pending` after it has already consumed input. The
+    /// caller retries with the same buffer, so the bytes would be compressed
+    /// (and emitted) twice, corrupting the deflate stream.
+    #[tokio::test]
+    async fn test_encoder_backpressure_does_not_duplicate_input() {
+        // Incompressible data is required so that a single `poll_write` both
+        // consumes input and produces output (filling the internal buffer).
+        let mut state: u32 = 123_456_789;
+        let data: Vec<u8> = (0..65536)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state & 0xff) as u8
+            })
+            .collect();
+
+        for level in [
+            CompressionLevel::none(),
+            CompressionLevel::fast(),
+            CompressionLevel::default(),
+            CompressionLevel::best(),
+        ] {
+            for pending_on_call in 1..=8 {
+                let mut encoder = DeflateEncoder::new(
+                    FlakyWriter {
+                        data: Vec::new(),
+                        calls: 0,
+                        pending_on_call,
+                    },
+                    level,
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut encoder, &data)
+                    .await
+                    .unwrap();
+                tokio::io::AsyncWriteExt::shutdown(&mut encoder)
+                    .await
+                    .unwrap();
+                let inner = encoder.into_inner();
+
+                let decompressed = decompress(&inner.data, data.len());
+                assert_eq!(
+                    decompressed,
+                    data,
+                    "corrupted stream (level={}, pending_on_call={pending_on_call})",
+                    level.value()
+                );
+            }
+        }
     }
 }

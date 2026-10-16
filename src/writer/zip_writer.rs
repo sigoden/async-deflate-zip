@@ -111,6 +111,29 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         })
     }
 
+    /// Serialize a header into `scratch` and write it to `inner`.
+    ///
+    /// Both steps consume the `scratch` buffer. If either fails, `inner` has
+    /// already been moved out of `self` and cannot be recovered, so the writer
+    /// is marked as poisoned: later calls then report [`ZipError::Poisoned`]
+    /// instead of the misleading [`ZipError::WriterBusy`].
+    async fn write_scratch(
+        &mut self,
+        inner: &mut W,
+        write_to: impl FnOnce(&mut Vec<u8>) -> Result<(), ZipError>,
+    ) -> Result<(), ZipError> {
+        self.scratch.clear();
+        if let Err(e) = write_to(&mut self.scratch) {
+            self.poisoned = true;
+            return Err(e);
+        }
+        if let Err(e) = inner.write_all(&self.scratch).await {
+            self.poisoned = true;
+            return Err(ZipError::Io(e));
+        }
+        Ok(())
+    }
+
     /// Start a new file entry and return an [`EntryWriter`] for streaming data.
     ///
     /// Writes the Local File Header, then returns an `EntryWriter` that
@@ -160,9 +183,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         };
 
         let lfh = zip_format::LocalFileHeader::new(&name, method, *options.mtime(), true);
-        self.scratch.clear();
-        lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await?;
+        self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
+            .await?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
@@ -303,9 +325,8 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             *options.mtime(),
             false,
         );
-        self.scratch.clear();
-        lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await?;
+        self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
+            .await?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
@@ -373,15 +394,17 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             *options.mtime(),
             true,
         );
-        self.scratch.clear();
-        lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await?;
+        self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
+            .await?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
         // Write the symlink target as stored (uncompressed) data
         let target_bytes = target.as_bytes();
-        inner.write_all(target_bytes).await?;
+        if let Err(e) = inner.write_all(target_bytes).await {
+            self.poisoned = true;
+            return Err(ZipError::Io(e));
+        }
         self.pos += target_bytes.len() as u64;
 
         // CRC-32 of the target path
@@ -552,7 +575,40 @@ mod tests {
     use super::*;
     use crate::CompressionLevel;
     use crate::test_utils::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use tokio::io::AsyncWriteExt;
+
+    /// A writer that fails the `fail_on`-th `poll_write` (1-based), then
+    /// succeeds on subsequent calls.
+    #[derive(Debug)]
+    struct FailingWriter {
+        calls: usize,
+        fail_on: usize,
+    }
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.calls += 1;
+            if self.calls == self.fail_on {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "boom",
+                )));
+            }
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn test_zip_write_single_file() {
@@ -827,5 +883,54 @@ mod tests {
         }
         zip.finish().await.unwrap();
         assert_entry_count(&buf, 4);
+    }
+
+    /// A failed Local File Header write moves the inner writer out of the
+    /// `ZipWriter` and drops it. The writer must be poisoned so later calls
+    /// report `Poisoned` rather than the misleading `WriterBusy`.
+    #[tokio::test]
+    async fn test_header_write_error_poisons_writer() {
+        // First `poll_write` (the Local File Header) fails.
+        let mut zip = ZipWriter::new(FailingWriter {
+            calls: 0,
+            fail_on: 1,
+        });
+        let err = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .err()
+            .expect("start_file should fail");
+        assert!(matches!(err, ZipError::Io(_)), "expected Io, got {err}");
+
+        let err = zip.finish().await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned, got {err}"
+        );
+    }
+
+    /// Same as above, but for a failure while finalizing the deflate stream in
+    /// `EntryWriter::finish`.
+    #[tokio::test]
+    async fn test_entry_finish_error_poisons_writer() {
+        // The Local File Header succeeds (call 1); the deflate output written
+        // during `entry.finish()` fails (call 2).
+        let mut zip = ZipWriter::new(FailingWriter {
+            calls: 0,
+            fail_on: 2,
+        });
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(&vec![b'A'; 4096]).await.unwrap();
+        let err = entry.finish().await.unwrap_err();
+        assert!(matches!(err, ZipError::Io(_)), "expected Io, got {err}");
+
+        let err = zip.finish().await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned, got {err}"
+        );
     }
 }

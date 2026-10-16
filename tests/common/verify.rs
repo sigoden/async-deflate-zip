@@ -26,37 +26,31 @@ pub fn verify_unzip(path: &Path) {
     );
 }
 
-/// Try to open the zip with the `zip` crate and verify the entry count.
-/// Falls back to unzip if the zip crate can't parse the file.
-pub fn verify_archive_count(path: &Path, expected: usize) {
+/// Open the archive with the `zip` crate, failing the test if it cannot be
+/// parsed.
+///
+/// Earlier this fell back to `unzip -t` on a parse error, which silently
+/// skipped the entry-count/content assertions and could hide regressions.
+fn open_archive(path: &Path) -> zip::ZipArchive<std::io::BufReader<std::fs::File>> {
     let file = std::fs::File::open(path).unwrap();
-    let reader = std::io::BufReader::new(file);
-    match zip::ZipArchive::new(reader) {
-        Ok(archive) => assert_eq!(archive.len(), expected),
-        Err(e) => {
-            eprintln!("[verify] zip crate error (falling back to unzip): {e:?}");
-            verify_unzip(path);
-        }
-    }
+    zip::ZipArchive::new(std::io::BufReader::new(file))
+        .unwrap_or_else(|e| panic!("the `zip` crate failed to parse {}: {e}", path.display()))
 }
 
-/// Try to verify entry content with the `zip` crate.
-/// Falls back to unzip if the zip crate can't parse the file.
+/// Verify the entry count with the `zip` crate.
+pub fn verify_archive_count(path: &Path, expected: usize) {
+    assert_eq!(open_archive(path).len(), expected);
+}
+
+/// Verify entry content with the `zip` crate.
 pub fn verify_entry_content(path: &Path, name: &str, expected: &[u8]) {
-    let file = std::fs::File::open(path).unwrap();
-    let reader = std::io::BufReader::new(file);
-    match zip::ZipArchive::new(reader) {
-        Ok(mut archive) => {
-            let mut entry = archive.by_name(name).unwrap();
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).unwrap();
-            assert_eq!(buf, expected);
-        }
-        Err(e) => {
-            eprintln!("[verify] zip crate error for content check (falling back to unzip): {e:?}");
-            verify_unzip(path);
-        }
-    }
+    let mut archive = open_archive(path);
+    let mut entry = archive
+        .by_name(name)
+        .unwrap_or_else(|e| panic!("entry {name:?} not found in {}: {e}", path.display()));
+    let mut buf = Vec::new();
+    entry.read_to_end(&mut buf).unwrap();
+    assert_eq!(buf, expected, "content mismatch for {name:?}");
 }
 
 /// Shorthand: runs unzip and zip-rs verification (with fallback).

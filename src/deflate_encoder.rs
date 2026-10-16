@@ -289,7 +289,15 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                     Status::StreamEnd => break,
                     Status::Ok => continue,
                     Status::BufError if produced > 0 => continue,
-                    Status::BufError => break,
+                    // No progress and the output buffer cannot grow further:
+                    // the end-of-stream marker was not written. Fail instead of
+                    // silently finishing a truncated deflate stream (matching
+                    // `poll_write`'s "deflate encoder stalled" behavior).
+                    Status::BufError => {
+                        return Poll::Ready(Err(io::Error::other(
+                            "deflate encoder stalled during shutdown",
+                        )));
+                    }
                 }
             }
 

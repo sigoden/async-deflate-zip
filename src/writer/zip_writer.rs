@@ -4,11 +4,12 @@ use super::stored_entry::StoredEntry;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
-use crate::validate::{validate_comment, validate_input};
+use crate::validate::{validate_comment, validate_input, validate_symlink_target};
 use crate::zip_format;
 
 use crate::CompressionLevel;
 
+use std::fmt;
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
@@ -45,6 +46,19 @@ pub struct ZipWriter<W: AsyncWrite + Unpin> {
     pub(crate) poisoned: bool,
     comment: Option<Vec<u8>>,
     pub(crate) scratch: Vec<u8>,
+}
+
+impl<W: AsyncWrite + Unpin> fmt::Debug for ZipWriter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZipWriter")
+            .field("entries", &self.entries.len())
+            .field("level", &self.level)
+            .field("pos", &self.pos)
+            .field("poisoned", &self.poisoned)
+            .field("comment_len", &self.comment.as_ref().map(Vec::len))
+            .field("inner", &self.inner.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl<W: AsyncWrite + Unpin> ZipWriter<W> {
@@ -100,15 +114,26 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         self
     }
 
-    /// Take ownership of the inner writer, returning an error if it's already taken.
+    /// Take ownership of the inner writer, returning an error if it's already
+    /// taken.
+    ///
+    /// While the writer is out, the `ZipWriter` is marked as poisoned. The
+    /// writer is moved into the caller (or into an [`EntryWriter`]), so if the
+    /// surrounding future is cancelled at an `.await` — e.g. via
+    /// `tokio::time::timeout`, `select!`, or `JoinHandle::abort` — the writer
+    /// is dropped with that future and can never be recovered. Marking it
+    /// poisoned up front makes that state observable as [`ZipError::Poisoned`]
+    /// instead of the misleading [`ZipError::WriterBusy`]. Every site that
+    /// hands the writer back must clear the flag again.
     fn take_inner(&mut self) -> Result<W, ZipError> {
-        self.inner.take().ok_or({
-            if self.poisoned {
-                ZipError::Poisoned
-            } else {
-                ZipError::WriterBusy
+        match self.inner.take() {
+            Some(inner) => {
+                self.poisoned = true;
+                Ok(inner)
             }
-        })
+            None if self.poisoned => Err(ZipError::Poisoned),
+            None => Err(ZipError::WriterBusy),
+        }
     }
 
     /// Serialize a header into `scratch` and write it to `inner`.
@@ -355,6 +380,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         });
 
         self.inner = Some(inner);
+        self.poisoned = false;
         Ok(())
     }
 
@@ -368,9 +394,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if the writer is poisoned, or if writing the
-    /// Local File Header, symlink target, or Data Descriptor fails (I/O error
-    /// or field too long).
+    /// Returns [`ZipError::InvalidInput`] if the name is invalid, or the target
+    /// is empty or contains a NUL byte. Returns [`ZipError`] if the writer is
+    /// poisoned, or if writing the Local File Header, symlink target, or Data
+    /// Descriptor fails (I/O error or field too long).
     ///
     /// # Example
     ///
@@ -397,6 +424,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             });
         }
         validate_input(&name, options.comment())?;
+        validate_symlink_target(target)?;
 
         let mut inner = self.take_inner()?;
 
@@ -457,6 +485,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             comment: options.comment().map(|c| c.to_vec()),
         });
         self.inner = Some(inner);
+        self.poisoned = false;
         Ok(())
     }
 
@@ -539,8 +568,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// Returns [`ZipError::WriterBusy`] if an [`EntryWriter`] is still active
     /// (the inner writer has been moved into that entry), or
-    /// [`ZipError::Poisoned`] if the writer is in a poisoned state (an entry
-    /// was dropped without finishing).
+    /// [`ZipError::Poisoned`] if the writer is in a poisoned state — an entry
+    /// was dropped without finishing, or an async operation was cancelled
+    /// while the inner writer was checked out (the writer is dropped with the
+    /// cancelled future and can no longer be recovered).
     pub fn abort(self) -> Result<W, ZipError> {
         self.inner.ok_or(if self.poisoned {
             ZipError::Poisoned
@@ -899,6 +930,36 @@ mod tests {
         );
     }
 
+    /// `start_file`'s `Ok` type (`EntryWriter`) must implement `Debug` without
+    /// requiring `W: Debug`, so `unwrap_err()` compiles.
+    #[tokio::test]
+    async fn test_start_file_error_is_debuggable() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let err = zip
+            .start_file("../evil", &EntryOptions::file())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ZipError::InvalidInput { .. }));
+    }
+
+    /// An empty or NUL-containing symlink target must be rejected up front.
+    #[tokio::test]
+    async fn test_reject_invalid_symlink_target() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        for target in ["", "bad\0target"] {
+            let err = zip
+                .add_symlink("link", target, &EntryOptions::symlink())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ZipError::InvalidInput { .. }),
+                "expected InvalidInput for {target:?}, got {err}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_accept_safe_names() {
         let mut buf = Vec::new();
@@ -925,8 +986,7 @@ mod tests {
         let err = zip
             .start_file("a.txt", &EntryOptions::file())
             .await
-            .err()
-            .expect("start_file should fail");
+            .expect_err("start_file should fail");
         assert!(matches!(err, ZipError::Io(_)), "expected Io, got {err}");
 
         let err = zip.finish().await.unwrap_err();

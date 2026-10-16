@@ -201,9 +201,16 @@ mod tests {
         let link = dir.path().join("link.txt");
         symlink(&target, &link).unwrap();
 
-        // `from_path` reports the symlink's own metadata ...
+        // `from_path` reports the symlink's own metadata. The mode of a symlink
+        // is platform-defined (0o777 on Linux, 0o755 on macOS), so read it back
+        // instead of hardcoding it.
+        let link_mode = std::fs::symlink_metadata(&link)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
         let link_opts = EntryOptions::from_path(&link).await.unwrap();
-        assert_eq!(link_opts.unix_permissions(), Some(0o777));
+        assert_eq!(link_opts.unix_permissions(), Some(link_mode));
 
         // ... while `from_path_following` reports the target's metadata.
         let target_opts = EntryOptions::from_path_following(&link).await.unwrap();

@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn test_system_time_to_ms_dos_clamps_out_of_range() {
+    fn test_ms_dos_clamps_out_of_range() {
         let far_future = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100_000_000_000);
         let (_, date) = system_time_to_ms_dos(far_future);
         assert_eq!(date_year(date), 2107);
@@ -84,10 +84,7 @@ mod tests {
         let far_past = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(2_000_000_000);
         let (_, date) = system_time_to_ms_dos(far_past);
         assert_eq!(date_year(date), 1980);
-    }
 
-    #[test]
-    fn test_unix_secs_to_ms_dos_out_of_range() {
         let (_, date) = unix_secs_to_ms_dos(u64::MAX);
         assert_eq!(date_year(date), 2107);
 

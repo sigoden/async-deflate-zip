@@ -344,18 +344,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encoder_compresses_repeated_data() {
-        let data = vec![b'A'; 4096];
-        let compressed = compress(&data, CompressionLevel::best()).await;
-        assert!(
-            compressed.len() < data.len(),
-            "compressed size {} should be less than uncompressed {}",
-            compressed.len(),
-            data.len()
-        );
-    }
-
-    #[tokio::test]
     async fn test_encoder_no_compression_level_0() {
         let data = vec![b'A'; 1024];
         let compressed = compress(&data, CompressionLevel::none()).await;

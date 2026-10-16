@@ -223,6 +223,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_entry_mtime_appears_in_cd_extra() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip
+            .start_file("mtime_test.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(b"hello").await.unwrap();
+        entry.finish().await.unwrap();
+        zip.finish().await.unwrap();
+
+        assert_extra_has_tag(&buf, "mtime_test.txt", b"UT");
+    }
+
+    #[tokio::test]
     async fn test_entry_permissions() {
         for (mode, name) in [(0o644, "perm_test.txt"), (0o4755, "setuid_test.txt")] {
             let mut buf = Vec::new();
@@ -239,21 +254,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_entry_mtime_appears_in_cd_extra() {
-        let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf);
-        let mut entry = zip
-            .start_file("mtime_test.txt", &EntryOptions::file())
-            .await
-            .unwrap();
-        entry.write_all(b"hello").await.unwrap();
-        entry.finish().await.unwrap();
-        zip.finish().await.unwrap();
-
-        assert_extra_has_tag(&buf, "mtime_test.txt", b"UT");
-    }
-
-    #[tokio::test]
     async fn test_entry_drop_poisons_zip_writer() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
@@ -264,24 +264,14 @@ mod tests {
                 .unwrap(),
         );
 
-        let result = zip.start_file("another.txt", &EntryOptions::file()).await;
-        assert!(result.is_err(), "expected Err, got Ok");
-        let err = result.err().unwrap();
+        let err = zip
+            .start_file("another.txt", &EntryOptions::file())
+            .await
+            .err()
+            .expect("expected Err, got Ok");
         assert!(
             matches!(err, ZipError::Poisoned),
             "expected Poisoned, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_entry_drop_poison_affects_finish() {
-        let mut buf = Vec::new();
-        let mut zip = ZipWriter::new(&mut buf);
-
-        drop(
-            zip.start_file("lost.txt", &EntryOptions::file())
-                .await
-                .unwrap(),
         );
 
         let err = zip.finish().await.unwrap_err();

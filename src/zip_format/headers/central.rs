@@ -177,10 +177,8 @@ mod tests {
         assert_eq!(read_u64(extra, 4), 10_000_000_000);
         assert_eq!(read_u64(extra, 12), 5_000_000_000);
         assert_eq!(read_u64(extra, 20), 0);
-    }
 
-    #[test]
-    fn test_cd_zip64_with_extra_field() {
+        // ZIP64 extra combined with an extended-timestamp extra.
         let mut combined_extra = Vec::new();
         ExtendedTimestampExtra::new(1700000000).serialize(&mut combined_extra);
         Zip64Extra {

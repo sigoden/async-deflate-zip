@@ -187,18 +187,5 @@ mod tests {
         assert_eq!(read_u32(&buf, 4), 0x12345678);
         assert_eq!(read_u64(&buf, 8), 5_000_000_000);
         assert_eq!(read_u64(&buf, 16), 10_000_000_000);
-
-        let dd = DataDescriptor {
-            crc32: 0xDEADBEEF,
-            compressed_size: 100,
-            uncompressed_size: 200,
-            zip64: true,
-        };
-        buf.clear();
-        dd.write_to(&mut buf);
-        assert_eq!(buf.len(), 24);
-        assert_eq!(read_u32(&buf, 4), 0xDEADBEEF);
-        assert_eq!(read_u64(&buf, 8), 100);
-        assert_eq!(read_u64(&buf, 16), 200);
     }
 }

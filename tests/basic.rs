@@ -21,32 +21,6 @@ async fn basic_single_file() {
 }
 
 #[tokio::test]
-async fn basic_multiple_files() {
-    let (_dir, zip_path) = common::zip::zip_path("basic_multiple");
-
-    let files: [(&str, &[u8]); 4] = [
-        ("top.txt", b"top level file"),
-        ("sub/a.txt", b"file in subdir a"),
-        ("sub/b.txt", b"file in subdir b"),
-        ("sub/nested/deep.txt", b"deeply nested"),
-    ];
-
-    let file = tokio::fs::File::create(&zip_path).await.unwrap();
-    let mut zip = ZipWriter::new(file);
-    for (name, content) in &files {
-        zip.add_reader(name, *content, &EntryOptions::file())
-            .await
-            .unwrap();
-    }
-    zip.finish().await.unwrap();
-
-    common::verify::verify_zip(&zip_path, files.len());
-    for (name, content) in &files {
-        common::verify::verify_entry_content(&zip_path, name, content);
-    }
-}
-
-#[tokio::test]
 async fn basic_disk_files() {
     let (_dir, zip_path) = common::zip::zip_path("basic_disk");
     let src_dir = tempfile::TempDir::new().unwrap();

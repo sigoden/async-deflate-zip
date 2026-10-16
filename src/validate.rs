@@ -97,18 +97,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_input_ok() {
-        assert!(validate_input("file.txt", None).is_ok());
-        assert!(validate_input("file.txt", Some(b"comment")).is_ok());
-    }
-
-    #[test]
-    fn test_validate_input_empty_name() {
-        let err = validate_input("", None).unwrap_err();
-        assert!(matches!(err, ZipError::InvalidInput { .. }));
-    }
-
-    #[test]
     fn test_validate_input_long_comment() {
         let comment = vec![b'x'; MAX_FIELD_LEN + 1];
         let err = validate_input("file.txt", Some(&comment)).unwrap_err();

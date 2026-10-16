@@ -175,19 +175,28 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                 (consumed, produced)
             };
 
-            // Drain the compressed output (if any) to the inner writer.
-            // If the inner writer would block, surface Pending so the caller
-            // can retry later.
+            // If some input was accepted, report success immediately. Compressed
+            // output still buffered in `out_buf` is drained at the start of the
+            // next call (or by poll_flush / poll_shutdown).
+            //
+            // Do NOT return Poll::Pending here: part of `buf` has already been
+            // fed into the compressor, and a Pending return would tell the
+            // caller its data was rejected — tokio::io::copy and write_all
+            // would re-submit the same bytes, duplicating them in the deflate
+            // stream and corrupting the archive.
+            if consumed > 0 {
+                return Poll::Ready(Ok(consumed));
+            }
+
+            // consumed == 0: the output buffer was full. Drain the compressed
+            // output to the inner writer. If the inner writer would block,
+            // surface Pending — safe here because no input has been consumed.
             if self.out_pos < self.out_len {
                 match self.as_mut().poll_drain(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,
                 }
-            }
-
-            if consumed > 0 {
-                return Poll::Ready(Ok(consumed));
             }
 
             if produced == 0 {

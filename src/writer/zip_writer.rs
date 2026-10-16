@@ -159,10 +159,19 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_DEFLATE
         };
 
-        let lfh = zip_format::LocalFileHeader::new(&name, method, *options.mtime(), true);
+        let lfh = zip_format::LocalFileHeader::new(
+            &name,
+            options.comment(),
+            method,
+            *options.mtime(),
+            true,
+        );
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await?;
+        inner.write_all(&self.scratch).await.map_err(|e| {
+            self.poisoned = true;
+            ZipError::Io(e)
+        })?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
@@ -299,13 +308,17 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let lfh = zip_format::LocalFileHeader::new(
             &name,
+            options.comment(),
             zip_format::METHOD_STORED,
             *options.mtime(),
             false,
         );
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await?;
+        inner.write_all(&self.scratch).await.map_err(|e| {
+            self.poisoned = true;
+            ZipError::Io(e)
+        })?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
@@ -369,19 +382,26 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let lfh = zip_format::LocalFileHeader::new(
             &name,
+            options.comment(),
             zip_format::METHOD_STORED,
             *options.mtime(),
             true,
         );
         self.scratch.clear();
         lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await?;
+        inner.write_all(&self.scratch).await.map_err(|e| {
+            self.poisoned = true;
+            ZipError::Io(e)
+        })?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
         // Write the symlink target as stored (uncompressed) data
         let target_bytes = target.as_bytes();
-        inner.write_all(target_bytes).await?;
+        inner.write_all(target_bytes).await.map_err(|e| {
+            self.poisoned = true;
+            ZipError::Io(e)
+        })?;
         self.pos += target_bytes.len() as u64;
 
         // CRC-32 of the target path
@@ -778,6 +798,35 @@ mod tests {
         zip.finish().await.unwrap();
 
         assert_archive_comment(&buf, "archive comment");
+    }
+
+    #[tokio::test]
+    async fn test_utf8_flag_from_comment() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip
+            .start_file(
+                "ascii.txt",
+                &EntryOptions::file().with_comment("日本語コメント"),
+            )
+            .await
+            .unwrap();
+        entry.write_all(b"data").await.unwrap();
+        entry.finish().await.unwrap();
+        zip.finish().await.unwrap();
+
+        // Local File Header flags: the General Purpose Bit Flag field starts
+        // at byte offset 6 (little-endian). EFS is bit 11 (0x0800), stored in
+        // the high byte with bit pattern 0x08.
+        assert!(
+            buf[7] & 0x08 != 0,
+            "local header must set EFS when the comment is non-ASCII"
+        );
+        // ... and the data descriptor bit (3) must remain in the low byte.
+        assert_eq!(buf[6] & 0x08, 0x08, "data descriptor flag must be intact");
+
+        // Round-trip: the `zip` crate must report the UTF-8 comment verbatim.
+        assert_entry_comment(&buf, "ascii.txt", "日本語コメント");
     }
 
     #[tokio::test]

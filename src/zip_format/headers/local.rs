@@ -17,11 +17,17 @@ pub(crate) struct LocalFileHeader {
 }
 
 impl LocalFileHeader {
-    pub(crate) fn new(name: &str, method: u16, mtime: SystemTime, use_data_desc: bool) -> Self {
+    pub(crate) fn new(
+        name: &str,
+        comment: Option<&[u8]>,
+        method: u16,
+        mtime: SystemTime,
+        use_data_desc: bool,
+    ) -> Self {
         let (time, date) = system_time_to_ms_dos(mtime);
         let mut flags = if use_data_desc { FLAG_DATA_DESC } else { 0 };
-        if !name.is_ascii() {
-            flags |= 1 << 11;
+        if entry_needs_utf8_flag(name, comment) {
+            flags |= FLAG_UTF8;
         }
         let unix_secs = mtime
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -116,7 +122,13 @@ mod tests {
 
     #[test]
     fn test_lfh_normal_case() {
-        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, SystemTime::UNIX_EPOCH, true);
+        let lfh = LocalFileHeader::new(
+            "test.txt",
+            None,
+            METHOD_DEFLATE,
+            SystemTime::UNIX_EPOCH,
+            true,
+        );
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), 38);
@@ -131,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_lfh_no_data_desc() {
-        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, SystemTime::UNIX_EPOCH, false);
+        let lfh = LocalFileHeader::new("dir/", None, METHOD_STORED, SystemTime::UNIX_EPOCH, false);
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), 34);
@@ -144,7 +156,7 @@ mod tests {
     #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, METHOD_STORED, SystemTime::UNIX_EPOCH, true);
+        let lfh = LocalFileHeader::new(&name, None, METHOD_STORED, SystemTime::UNIX_EPOCH, true);
         let mut buf = Vec::new();
         let result = lfh.write_to(&mut buf);
         assert!(result.is_err());
@@ -153,6 +165,35 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("filename too long")
+        );
+    }
+
+    #[test]
+    fn test_lfh_utf8_flag_from_comment() {
+        // ASCII name + non-ASCII comment: EFS (bit 11) must still be set.
+        let lfh = LocalFileHeader::new(
+            "ascii.txt",
+            Some("日本語".as_bytes()),
+            METHOD_DEFLATE,
+            SystemTime::UNIX_EPOCH,
+            true,
+        );
+        assert!(
+            lfh.flags & FLAG_UTF8 != 0,
+            "EFS must be set when the comment is non-ASCII"
+        );
+
+        // ASCII name + ASCII comment: flag must stay clear.
+        let lfh = LocalFileHeader::new(
+            "ascii.txt",
+            Some("plain".as_bytes()),
+            METHOD_DEFLATE,
+            SystemTime::UNIX_EPOCH,
+            true,
+        );
+        assert!(
+            lfh.flags & FLAG_UTF8 == 0,
+            "EFS must not be set for ASCII name and comment"
         );
     }
 

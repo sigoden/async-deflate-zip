@@ -102,7 +102,10 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             self.passthrough.take().ok_or(ZipError::Poisoned)?
         } else {
             let mut encoder = self.deflate_encoder.take().ok_or(ZipError::Poisoned)?;
-            encoder.shutdown().await?;
+            encoder.shutdown().await.map_err(|e| {
+                self.zip.poisoned = true;
+                ZipError::Io(e)
+            })?;
             self.compressed_size = encoder.written();
             encoder.into_inner()
         };

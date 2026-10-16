@@ -175,13 +175,22 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                 (consumed, produced)
             };
 
-            // Drain the compressed output (if any) to the inner writer.
-            // If the inner writer would block, surface Pending so the caller
-            // can retry later — but only when we have not already consumed
-            // input this round. Otherwise the caller would retry with the same
-            // buffer and the compressor would consume (and emit) those bytes
-            // twice, corrupting the deflate stream. The undrained output stays
-            // buffered in `out_buf`; the next call drains it first.
+            // If some input was accepted, report success immediately. Compressed
+            // output still buffered in `out_buf` is drained at the start of the
+            // next call (or by poll_flush / poll_shutdown).
+            //
+            // Do NOT return Poll::Pending here: part of `buf` has already been
+            // fed into the compressor, and a Pending return would tell the
+            // caller its data was rejected — tokio::io::copy and write_all
+            // would re-submit the same bytes, duplicating them in the deflate
+            // stream and corrupting the archive.
+            if consumed > 0 {
+                return Poll::Ready(Ok(consumed));
+            }
+
+            // consumed == 0: the output buffer was full. Drain the compressed
+            // output to the inner writer. If the inner writer would block,
+            // surface Pending — safe here because no input has been consumed.
             if self.out_pos < self.out_len {
                 match self.as_mut().poll_drain(cx) {
                     Poll::Ready(Ok(())) => {}
@@ -193,10 +202,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                         return Poll::Pending;
                     }
                 }
-            }
-
-            if consumed > 0 {
-                return Poll::Ready(Ok(consumed));
             }
 
             if produced == 0 {

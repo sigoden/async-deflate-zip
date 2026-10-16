@@ -2,7 +2,6 @@ use crate::error::ZipError;
 use crate::zip_format::binary::*;
 use crate::zip_format::constants::*;
 use crate::zip_format::extra_fields::*;
-use crate::zip_format::needs_utf8_flag;
 use crate::zip_format::time::system_time_to_ms_dos;
 
 use std::time::SystemTime;
@@ -27,7 +26,7 @@ impl LocalFileHeader {
     ) -> Self {
         let (time, date) = system_time_to_ms_dos(mtime);
         let mut flags = if use_data_desc { FLAG_DATA_DESC } else { 0 };
-        if needs_utf8_flag(name, comment) {
+        if entry_needs_utf8_flag(name, comment) {
             flags |= FLAG_UTF8;
         }
         let unix_secs = mtime
@@ -155,24 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lfh_utf8_flag_considers_comment() {
-        let lfh = LocalFileHeader::new(
-            "ascii.txt",
-            METHOD_STORED,
-            SystemTime::UNIX_EPOCH,
-            true,
-            Some("Grüße".as_bytes()),
-        );
-        let mut buf = Vec::new();
-        lfh.write_to(&mut buf).unwrap();
-        assert_ne!(
-            read_u16(&buf, 6) & FLAG_UTF8,
-            0,
-            "non-ASCII comment must set the UTF-8 flag in the local header"
-        );
-    }
-
-    #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
         let lfh = LocalFileHeader::new(&name, METHOD_STORED, SystemTime::UNIX_EPOCH, true, None);
@@ -184,6 +165,35 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("filename too long")
+        );
+    }
+
+    #[test]
+    fn test_lfh_utf8_flag_from_comment() {
+        // ASCII name + non-ASCII comment: EFS (bit 11) must still be set.
+        let lfh = LocalFileHeader::new(
+            "ascii.txt",
+            METHOD_DEFLATE,
+            SystemTime::UNIX_EPOCH,
+            true,
+            Some("日本語".as_bytes()),
+        );
+        assert!(
+            lfh.flags & FLAG_UTF8 != 0,
+            "EFS must be set when the comment is non-ASCII"
+        );
+
+        // ASCII name + ASCII comment: flag must stay clear.
+        let lfh = LocalFileHeader::new(
+            "ascii.txt",
+            METHOD_DEFLATE,
+            SystemTime::UNIX_EPOCH,
+            true,
+            Some("plain".as_bytes()),
+        );
+        assert!(
+            lfh.flags & FLAG_UTF8 == 0,
+            "EFS must not be set for ASCII name and comment"
         );
     }
 

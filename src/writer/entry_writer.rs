@@ -124,13 +124,10 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
             self.passthrough.take().ok_or(ZipError::Poisoned)?
         } else {
             let mut encoder = self.deflate_encoder.take().ok_or(ZipError::Poisoned)?;
-            if let Err(e) = encoder.shutdown().await {
-                // The inner writer was moved into the encoder and is dropped
-                // with it, so it can no longer be recovered: poison the parent
-                // so later calls report `Poisoned` rather than `WriterBusy`.
+            encoder.shutdown().await.map_err(|e| {
                 self.zip.poisoned = true;
-                return Err(ZipError::Io(e));
-            }
+                ZipError::Io(e)
+            })?;
             self.compressed_size = encoder.written();
             encoder.into_inner()
         };

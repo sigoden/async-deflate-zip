@@ -74,7 +74,7 @@ impl StoredEntry {
         } else {
             zip_format::FLAG_DATA_DESC
         };
-        if zip_format::needs_utf8_flag(&self.name, self.comment.as_deref()) {
+        if zip_format::entry_needs_utf8_flag(&self.name, self.comment.as_deref()) {
             flags |= zip_format::FLAG_UTF8;
         }
 
@@ -304,5 +304,33 @@ mod tests {
             "version_needed should be VERSION_ZIP64 (45) for entries needing ZIP64"
         );
         assert_eq!(cd.method, zip_format::METHOD_DEFLATE);
+    }
+
+    #[test]
+    fn test_to_central_dir_entry_utf8_flag_from_comment() {
+        // ASCII name + non-ASCII comment: EFS (bit 11) must still be set so
+        // readers decode the comment as UTF-8 instead of CP437.
+        let entry = StoredEntry {
+            name: "plain.txt".to_string(),
+            comment: Some("日本語コメント".as_bytes().to_vec()),
+            ..default_entry()
+        };
+        let cd = entry.to_central_dir_entry();
+        assert!(
+            cd.flags & zip_format::FLAG_UTF8 != 0,
+            "EFS must be set when the comment is non-ASCII"
+        );
+
+        // ASCII name + ASCII comment: flag must stay clear.
+        let entry = StoredEntry {
+            name: "plain.txt".to_string(),
+            comment: Some("plain".as_bytes().to_vec()),
+            ..default_entry()
+        };
+        let cd = entry.to_central_dir_entry();
+        assert!(
+            cd.flags & zip_format::FLAG_UTF8 == 0,
+            "EFS must not be set for ASCII name and comment"
+        );
     }
 }

@@ -881,6 +881,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_utf8_flag_from_comment() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let mut entry = zip
+            .start_file(
+                "ascii.txt",
+                &EntryOptions::file().with_comment("日本語コメント"),
+            )
+            .await
+            .unwrap();
+        entry.write_all(b"data").await.unwrap();
+        entry.finish().await.unwrap();
+        zip.finish().await.unwrap();
+
+        // Local File Header flags: the General Purpose Bit Flag field starts
+        // at byte offset 6 (little-endian). EFS is bit 11 (0x0800), stored in
+        // the high byte with bit pattern 0x08.
+        assert!(
+            buf[7] & 0x08 != 0,
+            "local header must set EFS when the comment is non-ASCII"
+        );
+        // ... and the data descriptor bit (3) must remain in the low byte.
+        assert_eq!(buf[6] & 0x08, 0x08, "data descriptor flag must be intact");
+
+        // Round-trip: the `zip` crate must report the UTF-8 comment verbatim.
+        assert_entry_comment(&buf, "ascii.txt", "日本語コメント");
+    }
+
+    #[tokio::test]
     async fn test_reject_path_traversal_names() {
         for name in [
             "../evil.txt",

@@ -22,8 +22,18 @@ pub(crate) const METHOD_DEFLATE: u16 = 8;
 /// Flags bit: Data Descriptor follows the file data.
 pub(crate) const FLAG_DATA_DESC: u16 = 1 << 3;
 
-/// Flags bit: filename **and comment** are encoded as UTF-8 (EFS).
+/// Flags bit: Languages Encoding Flag (EFS) — the entry's filename and
+/// comment are UTF-8 encoded.
 pub(crate) const FLAG_UTF8: u16 = 1 << 11;
+
+/// Whether an entry needs the Languages Encoding Flag (EFS, bit 11).
+///
+/// Per APPNOTE, the flag covers both the filename and the file comment: it
+/// must be set when *either* field contains non-ASCII bytes. Without it,
+/// readers decode the affected field as CP437 and mojibake the comment.
+pub(crate) fn entry_needs_utf8_flag(name: &str, comment: Option<&[u8]>) -> bool {
+    !name.is_ascii() || comment.is_some_and(|c| !c.is_ascii())
+}
 
 /// Version needed: 1.0 (10) — supports stored (uncompressed) entries.
 pub(crate) const VERSION_STORED: u16 = 10;

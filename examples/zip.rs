@@ -87,8 +87,11 @@ async fn add_targets<W: AsyncWriteExt + Unpin>(
     zip: &mut ZipWriter<W>,
     targets: &[PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if targets.len() == 1 && targets[0].is_dir() {
-        return Box::pin(add_dir(zip, &targets[0], &targets[0], None)).await;
+    if targets.len() == 1 {
+        let file_type = fs::symlink_metadata(&targets[0]).await?.file_type();
+        if file_type.is_dir() {
+            return Box::pin(add_dir(zip, &targets[0], &targets[0], None)).await;
+        }
     }
 
     for target in targets {
@@ -98,18 +101,21 @@ async fn add_targets<W: AsyncWriteExt + Unpin>(
             .unwrap_or_else(|| target.as_os_str())
             .to_string_lossy()
             .into_owned();
-        if target.is_dir() {
+        // Inspect the entry itself rather than following symlinks, so a
+        // symbolic link is stored as a symlink (matching `add_dir`).
+        let file_type = fs::symlink_metadata(target).await?.file_type();
+        if file_type.is_symlink() {
+            let link_target = fs::read_link(target).await?;
+            zip.add_symlink(&target_name, &link_target.to_string_lossy(), &entry_options)
+                .await?;
+        } else if file_type.is_dir() {
             zip.add_directory(&target_name, &entry_options).await?;
             Box::pin(add_dir(zip, target, target, Some(&target_name))).await?;
-        } else if target.is_file() {
+        } else if file_type.is_file() {
             let mut entry = zip.start_file(&target_name, &entry_options).await?;
             let mut file = fs::File::open(target).await?;
             tokio::io::copy(&mut file, &mut entry).await?;
             entry.finish().await?;
-        } else if target.is_symlink() {
-            let link_target = fs::read_link(target).await?;
-            zip.add_symlink(&target_name, &link_target.to_string_lossy(), &entry_options)
-                .await?;
         }
     }
 

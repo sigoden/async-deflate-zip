@@ -182,7 +182,16 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.project();
-        poll_active_writer!(this, cx, poll_shutdown)
+        // Do NOT propagate `shutdown` to the shared archive writer for stored
+        // entries: it would close the archive before the entry's data
+        // descriptor and the central directory are written. `DeflateEncoder`
+        // already avoids this by not forwarding shutdown to its inner writer,
+        // so mirror that here by flushing the passthrough instead.
+        if *this.is_stored {
+            poll_active_writer!(this, cx, poll_flush)
+        } else {
+            poll_active_writer!(this, cx, poll_shutdown)
+        }
     }
 }
 
@@ -284,6 +293,67 @@ mod tests {
         assert!(
             matches!(err, ZipError::Poisoned),
             "expected Poisoned, got: {err}"
+        );
+    }
+
+    /// `shutdown` on a per-entry writer must not shut down the shared archive
+    /// writer, or the data descriptor / central directory would be written to
+    /// an already closed writer.
+    #[tokio::test]
+    async fn test_stored_entry_shutdown_does_not_close_archive() {
+        use crate::CompressionLevel;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use tokio::io::AsyncWrite;
+
+        struct Tracker {
+            shutdown_called: bool,
+            writes_after_shutdown: usize,
+        }
+
+        impl AsyncWrite for Tracker {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if self.shutdown_called {
+                    self.writes_after_shutdown += 1;
+                }
+                Poll::Ready(Ok(buf.len()))
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.shutdown_called = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut zip = ZipWriter::new(Tracker {
+            shutdown_called: false,
+            writes_after_shutdown: 0,
+        })
+        .with_compression_level(CompressionLevel::none());
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(b"hello").await.unwrap();
+        entry.shutdown().await.unwrap();
+        entry.finish().await.unwrap();
+        let tracker = zip.finish().await.unwrap();
+
+        assert_eq!(
+            tracker.writes_after_shutdown, 0,
+            "data descriptor / central directory written after the archive writer was shut down"
         );
     }
 }

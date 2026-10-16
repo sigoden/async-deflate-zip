@@ -22,6 +22,9 @@ pub(crate) const METHOD_DEFLATE: u16 = 8;
 /// Flags bit: Data Descriptor follows the file data.
 pub(crate) const FLAG_DATA_DESC: u16 = 1 << 3;
 
+/// Flags bit: filename **and comment** are encoded as UTF-8 (EFS).
+pub(crate) const FLAG_UTF8: u16 = 1 << 11;
+
 /// Version needed: 1.0 (10) — supports stored (uncompressed) entries.
 pub(crate) const VERSION_STORED: u16 = 10;
 
@@ -48,6 +51,10 @@ pub(crate) const DEFAULT_DIR_PERM: u32 = 0o755;
 
 /// Default Unix permissions for symlink files.
 pub(crate) const DEFAULT_SYMLINK_PERM: u32 = 0o777;
+
+/// MS-DOS "directory" attribute bit, stored in the low word of the external
+/// file attributes field (APPNOTE 4.4.2.2).
+pub(crate) const MSDOS_ATTR_DIRECTORY: u32 = 0x10;
 
 /// Whether a data descriptor needs ZIP64 extensions.
 ///

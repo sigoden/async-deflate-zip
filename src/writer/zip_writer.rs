@@ -182,7 +182,13 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_DEFLATE
         };
 
-        let lfh = zip_format::LocalFileHeader::new(&name, method, *options.mtime(), true);
+        let lfh = zip_format::LocalFileHeader::new(
+            &name,
+            method,
+            *options.mtime(),
+            true,
+            options.comment(),
+        );
         self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
             .await?;
         let offset = self.pos;
@@ -324,6 +330,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_STORED,
             *options.mtime(),
             false,
+            options.comment(),
         );
         self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
             .await?;
@@ -384,6 +391,11 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         options: &EntryOptions,
     ) -> Result<(), ZipError> {
         let name = sanitize_entry_name(name)?;
+        if name.ends_with('/') {
+            return Err(ZipError::InvalidInput {
+                reason: "symlink entry name must not end with '/'",
+            });
+        }
         validate_input(&name, options.comment())?;
 
         let mut inner = self.take_inner()?;
@@ -393,6 +405,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             zip_format::METHOD_STORED,
             *options.mtime(),
             true,
+            options.comment(),
         );
         self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
             .await?;
@@ -869,6 +882,20 @@ mod tests {
             zip.add_symlink("../../link", "../target", &EntryOptions::symlink())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reject_symlink_name_with_trailing_slash() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let err = zip
+            .add_symlink("link/", "target", &EntryOptions::symlink())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ZipError::InvalidInput { .. }),
+            "expected InvalidInput, got {err}"
         );
     }
 

@@ -2,6 +2,7 @@ use crate::error::ZipError;
 use crate::zip_format::binary::*;
 use crate::zip_format::constants::*;
 use crate::zip_format::extra_fields::*;
+use crate::zip_format::needs_utf8_flag;
 use crate::zip_format::time::system_time_to_ms_dos;
 
 use std::time::SystemTime;
@@ -17,11 +18,17 @@ pub(crate) struct LocalFileHeader {
 }
 
 impl LocalFileHeader {
-    pub(crate) fn new(name: &str, method: u16, mtime: SystemTime, use_data_desc: bool) -> Self {
+    pub(crate) fn new(
+        name: &str,
+        method: u16,
+        mtime: SystemTime,
+        use_data_desc: bool,
+        comment: Option<&[u8]>,
+    ) -> Self {
         let (time, date) = system_time_to_ms_dos(mtime);
         let mut flags = if use_data_desc { FLAG_DATA_DESC } else { 0 };
-        if !name.is_ascii() {
-            flags |= 1 << 11;
+        if needs_utf8_flag(name, comment) {
+            flags |= FLAG_UTF8;
         }
         let unix_secs = mtime
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -116,7 +123,13 @@ mod tests {
 
     #[test]
     fn test_lfh_normal_case() {
-        let lfh = LocalFileHeader::new("test.txt", METHOD_DEFLATE, SystemTime::UNIX_EPOCH, true);
+        let lfh = LocalFileHeader::new(
+            "test.txt",
+            METHOD_DEFLATE,
+            SystemTime::UNIX_EPOCH,
+            true,
+            None,
+        );
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), 38);
@@ -131,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_lfh_no_data_desc() {
-        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, SystemTime::UNIX_EPOCH, false);
+        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, SystemTime::UNIX_EPOCH, false, None);
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), 34);
@@ -142,9 +155,27 @@ mod tests {
     }
 
     #[test]
+    fn test_lfh_utf8_flag_considers_comment() {
+        let lfh = LocalFileHeader::new(
+            "ascii.txt",
+            METHOD_STORED,
+            SystemTime::UNIX_EPOCH,
+            true,
+            Some("Grüße".as_bytes()),
+        );
+        let mut buf = Vec::new();
+        lfh.write_to(&mut buf).unwrap();
+        assert_ne!(
+            read_u16(&buf, 6) & FLAG_UTF8,
+            0,
+            "non-ASCII comment must set the UTF-8 flag in the local header"
+        );
+    }
+
+    #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, METHOD_STORED, SystemTime::UNIX_EPOCH, true);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, SystemTime::UNIX_EPOCH, true, None);
         let mut buf = Vec::new();
         let result = lfh.write_to(&mut buf);
         assert!(result.is_err());

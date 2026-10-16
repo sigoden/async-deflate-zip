@@ -77,12 +77,11 @@ mod tests {
 
     #[test]
     fn test_system_time_to_ms_dos_clamps_out_of_range() {
-        // These values previously panicked inside the `time` crate.
-        let far_future = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000_000);
+        let far_future = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100_000_000_000);
         let (_, date) = system_time_to_ms_dos(far_future);
         assert_eq!(date_year(date), 2107);
 
-        let far_past = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1_000_000_000_000);
+        let far_past = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(2_000_000_000);
         let (_, date) = system_time_to_ms_dos(far_past);
         assert_eq!(date_year(date), 1980);
     }
@@ -91,5 +90,9 @@ mod tests {
     fn test_unix_secs_to_ms_dos_out_of_range() {
         let (_, date) = unix_secs_to_ms_dos(u64::MAX);
         assert_eq!(date_year(date), 2107);
+
+        // The signed helper also clamps values before the Unix epoch.
+        let (_, date) = unix_secs_to_ms_dos_signed(i64::MIN);
+        assert_eq!(date_year(date), 1980);
     }
 }

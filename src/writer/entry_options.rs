@@ -184,6 +184,7 @@ impl EntryOptions {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]
@@ -211,6 +212,11 @@ mod tests {
             & 0o7777;
         let link_opts = EntryOptions::from_path(&link).await.unwrap();
         assert_eq!(link_opts.unix_permissions(), Some(link_mode));
+        assert_ne!(
+            link_opts.unix_permissions(),
+            Some(0o640),
+            "`from_path` must not follow the symlink"
+        );
 
         // ... while `from_path_following` reports the target's metadata.
         let target_opts = EntryOptions::from_path_following(&link).await.unwrap();

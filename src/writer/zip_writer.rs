@@ -231,8 +231,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
     /// Read a file from the filesystem and add it to the archive.
     ///
-    /// Opens `path` with [`tokio::fs::File`] and derives [`EntryOptions`]
-    /// from the file's metadata via [`EntryOptions::from_path`].
+    /// Symbolic links are **followed**: the link target's contents are stored
+    /// and the entry is registered as a regular file. Metadata (permissions,
+    /// UID/GID, mtime) is likewise read from the link target via
+    /// [`EntryOptions::from_path_following`].
     ///
     /// # Errors
     ///
@@ -253,7 +255,9 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # }
     /// ```
     pub async fn add_file(&mut self, name: &str, path: &Path) -> Result<(), ZipError> {
-        let options = EntryOptions::from_path(path).await.map_err(ZipError::Io)?;
+        let options = EntryOptions::from_path_following(path)
+            .await
+            .map_err(ZipError::Io)?;
         let file = tokio::fs::File::open(path).await.map_err(ZipError::Io)?;
         self.add_reader(name, file, &options).await
     }
@@ -435,6 +439,12 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// poisoned, if writing the Central Directory or EOCDR fails (I/O error or
     /// field too long), or if the inner writer's shutdown fails.
     pub async fn finish(mut self) -> Result<W, ZipError> {
+        // Validate the archive comment before emitting anything, so a too-long
+        // comment does not leave a partially written archive.
+        if let Some(ref comment) = self.comment {
+            validate_comment(comment)?;
+        }
+
         let mut inner = self.take_inner()?;
         let cd_offset = self.pos;
 
@@ -469,9 +479,6 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             self.pos += self.scratch.len() as u64;
         }
 
-        if let Some(ref comment) = self.comment {
-            validate_comment(comment)?;
-        }
         let eocdr = zip_format::Eocdr {
             total_entries,
             cd_size,
@@ -507,11 +514,34 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     }
 }
 
+/// Normalize an entry name and reject anything that could escape the
+/// extraction root when the archive is later unpacked (Zip Slip).
+///
+/// Backslashes are normalized to `/` (so Windows-style paths are caught),
+/// then the name is rejected if it is absolute or contains a `..` component
+/// or a Windows drive prefix.
 fn sanitize_entry_name(name: &str) -> Result<String, ZipError> {
     let name = name.replace('\\', "/");
     if name.is_empty() {
         return Err(ZipError::InvalidInput {
             reason: "entry name is empty",
+        });
+    }
+    if name.starts_with('/') {
+        return Err(ZipError::InvalidInput {
+            reason: "entry name must not be an absolute path",
+        });
+    }
+    if name.split('/').any(|component| component == "..") {
+        return Err(ZipError::InvalidInput {
+            reason: "entry name must not contain '..' components",
+        });
+    }
+    let first = name.split('/').next().unwrap_or("");
+    let bytes = first.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(ZipError::InvalidInput {
+            reason: "entry name must not contain a drive prefix",
         });
     }
     Ok(name)
@@ -748,5 +778,54 @@ mod tests {
         zip.finish().await.unwrap();
 
         assert_archive_comment(&buf, "archive comment");
+    }
+
+    #[tokio::test]
+    async fn test_reject_path_traversal_names() {
+        for name in [
+            "../evil.txt",
+            "a/../../b",
+            "/etc/passwd",
+            "C:\\Windows\\x",
+            "..",
+        ] {
+            let mut buf = Vec::new();
+            let mut zip = ZipWriter::new(&mut buf);
+            let err = zip
+                .start_file(name, &EntryOptions::file())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("expected {name:?} to be rejected"));
+            assert!(
+                matches!(err, ZipError::InvalidInput { .. }),
+                "expected InvalidInput for {name:?}, got {err}"
+            );
+        }
+
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        assert!(
+            zip.add_directory("../../dir", &EntryOptions::directory())
+                .await
+                .is_err()
+        );
+        assert!(
+            zip.add_symlink("../../link", "../target", &EntryOptions::symlink())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_accept_safe_names() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        for name in ["hello.txt", "sub/a.txt", "./ok.txt", "a..b/c.txt"] {
+            let mut entry = zip.start_file(name, &EntryOptions::file()).await.unwrap();
+            entry.write_all(b"x").await.unwrap();
+            entry.finish().await.unwrap();
+        }
+        zip.finish().await.unwrap();
+        assert_entry_count(&buf, 4);
     }
 }

@@ -10,7 +10,7 @@ pub(crate) const EOCDR_SIG: u32 = 0x06054b50;
 /// ZIP64 End of Central Directory Record signature: `PK\x06\x06` (`0x06064b50`).
 pub(crate) const EOCDR64_SIG: u32 = 0x06064b50;
 
-/// ZIP64 End of Central Directory Locator signature: `PK\x07\x06` (`0x07064b50`).
+/// ZIP64 End of Central Directory Locator signature: `PK\x06\x07` (`0x07064b50`).
 pub(crate) const EOCDR64L_SIG: u32 = 0x07064b50;
 
 /// No compression (stored method).
@@ -74,10 +74,11 @@ pub(crate) const fn entry_needs_zip64(
 
 /// Whether the archive itself needs ZIP64 records (Zip64Eocdr + Locator).
 ///
-/// ZIP64 is required when the total entry count exceeds 0xFFFF, or the
-/// Central Directory size or offset exceeds `U32_MAX`.
+/// ZIP64 is required when the total entry count reaches 0xFFFF (which is
+/// otherwise indistinguishable from the ZIP64 sentinel stored in the 16-bit
+/// EOCDR fields), or the Central Directory size or offset exceeds `U32_MAX`.
 pub(crate) const fn archive_needs_zip64(total_entries: u64, cd_size: u64, cd_offset: u64) -> bool {
-    total_entries > U16_ENTRY_MAX || cd_size > U32_MAX || cd_offset > U32_MAX
+    total_entries >= U16_ENTRY_MAX || cd_size > U32_MAX || cd_offset > U32_MAX
 }
 
 /// Data Descriptor signature: `PK\x07\x08` (`0x08074b50`).

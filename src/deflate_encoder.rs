@@ -191,9 +191,26 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
             }
 
             if produced == 0 {
-                // deflate encoder stalled — not expected during normal
-                // operation. Error instead of Ok(0) so write_all() does
-                // not misinterpret it as EOF and silently truncate output.
+                // deflate encoder stalled — the compressor is buffering
+                // internally with FlushCompress::None. Try a sync flush
+                // to force output before giving up.
+                let flushed = {
+                    let this = self.as_mut().get_mut();
+                    let (_, _status) = this.do_compress(&[], FlushCompress::Sync)?;
+                    this.out_len
+                };
+
+                if flushed > 0 {
+                    if self.out_pos < self.out_len {
+                        match self.as_mut().poll_drain(cx) {
+                            Poll::Ready(Ok(())) => {}
+                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Pending => return Poll::Pending,
+                        }
+                    }
+                    continue;
+                }
+
                 return Poll::Ready(Err(io::Error::other("deflate encoder stalled")));
             }
 

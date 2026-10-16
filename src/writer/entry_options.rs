@@ -49,16 +49,13 @@ impl Default for EntryOptions {
 }
 
 impl EntryOptions {
-    ///
-    /// The file's content is **not** read — only `symlink_metadata` is queried
-    /// so this works on symlinks, directories, and regular files alike.
+    /// Build options from already-obtained metadata.
     ///
     /// On Unix, permission bits are extracted from the file's mode and
     /// UID/GID from the file's owner. On non-Unix platforms, permissions
     /// default to `None` and UID/GID to `None`.
-    pub async fn from_path<T: AsRef<Path>>(path: T) -> std::io::Result<Self> {
-        let meta = fs::symlink_metadata(&path).await?;
-        Ok(Self {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
             mtime: meta.modified().unwrap_or_else(|_| SystemTime::now()),
             #[cfg(unix)]
             permissions: Some(meta.permissions().mode() & 0o7777),
@@ -75,7 +72,31 @@ impl EntryOptions {
                 }
             },
             comment: None,
-        })
+        }
+    }
+
+    /// Build options from a filesystem path **without** following symlinks.
+    ///
+    /// The file's content is **not** read — only `symlink_metadata` is queried
+    /// so this works on symlinks, directories, and regular files alike.
+    ///
+    /// On Unix, permission bits are extracted from the file's mode and
+    /// UID/GID from the file's owner. On non-Unix platforms, permissions
+    /// default to `None` and UID/GID to `None`.
+    pub async fn from_path<T: AsRef<Path>>(path: T) -> std::io::Result<Self> {
+        let meta = fs::symlink_metadata(&path).await?;
+        Ok(Self::from_metadata(&meta))
+    }
+
+    /// Like [`from_path`](Self::from_path), but follows symbolic links and
+    /// reads metadata from the link target.
+    ///
+    /// This matches [`ZipWriter::add_file`](crate::ZipWriter::add_file), which
+    /// follows symlinks and stores the target's contents as a regular file
+    /// entry.
+    pub async fn from_path_following<T: AsRef<Path>>(path: T) -> std::io::Result<Self> {
+        let meta = fs::metadata(&path).await?;
+        Ok(Self::from_metadata(&meta))
     }
 
     /// Convenience options for a regular file: permissions `0o644`,
@@ -158,5 +179,47 @@ impl EntryOptions {
     /// Per-entry comment bytes, if set.
     pub fn comment(&self) -> Option<&[u8]> {
         self.comment.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn from_path_following_uses_target_metadata() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        tokio::fs::write(&target, b"data").await.unwrap();
+        tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
+            .await
+            .unwrap();
+
+        let link = dir.path().join("link.txt");
+        symlink(&target, &link).unwrap();
+
+        // `from_path` reports the symlink's own metadata. The mode of a symlink
+        // is platform-defined (0o777 on Linux, 0o755 on macOS), so read it back
+        // instead of hardcoding it.
+        let link_mode = std::fs::symlink_metadata(&link)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        let link_opts = EntryOptions::from_path(&link).await.unwrap();
+        assert_eq!(link_opts.unix_permissions(), Some(link_mode));
+        assert_ne!(
+            link_opts.unix_permissions(),
+            Some(0o640),
+            "`from_path` must not follow the symlink"
+        );
+
+        // ... while `from_path_following` reports the target's metadata.
+        let target_opts = EntryOptions::from_path_following(&link).await.unwrap();
+        assert_eq!(target_opts.unix_permissions(), Some(0o640));
     }
 }

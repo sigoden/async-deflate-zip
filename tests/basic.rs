@@ -91,3 +91,42 @@ async fn basic_disk_files() {
     common::verify::verify_entry_content(&zip_path, name2, content2);
     common::verify::verify_entry_content(&zip_path, name3, content3);
 }
+
+/// `add_file` follows symbolic links: it stores the target's contents and
+/// metadata, registering the entry as a regular file.
+#[cfg(unix)]
+#[tokio::test]
+async fn basic_add_file_follows_symlink() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (_dir, zip_path) = common::zip::zip_path("add_file_symlink");
+    let src_dir = tempfile::TempDir::new().unwrap();
+
+    let target = src_dir.path().join("target.txt");
+    let content: &[u8] = b"follow the link";
+    tokio::fs::write(&target, content).await.unwrap();
+    tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
+        .await
+        .unwrap();
+
+    let link = src_dir.path().join("link.txt");
+    symlink(&target, &link).unwrap();
+
+    let file = tokio::fs::File::create(&zip_path).await.unwrap();
+    let mut zip = ZipWriter::new(file);
+    zip.add_file("link.txt", &link).await.unwrap();
+    zip.finish().await.unwrap();
+
+    common::verify::verify_zip(&zip_path, 1);
+    common::verify::verify_entry_content(&zip_path, "link.txt", content);
+
+    let f = std::fs::File::open(&zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(f)).unwrap();
+    let entry = archive.by_name("link.txt").unwrap();
+    assert!(entry.is_file(), "entry should be a regular file");
+    assert_eq!(
+        entry.unix_mode(),
+        Some(0o100640),
+        "metadata should come from the link target"
+    );
+}

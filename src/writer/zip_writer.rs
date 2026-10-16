@@ -100,6 +100,11 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// The comment is embedded in the End of Central Directory Record and can
     /// be up to 65535 bytes when encoded as UTF-8. Returns `self` for chaining.
     ///
+    /// The length is **not** checked here: an over-long comment is reported as
+    /// [`ZipError::FieldTooLong`] only by [`finish`](Self::finish), by which
+    /// time the entry data has already been written to the sink. Check the
+    /// length up front if the sink must not be left with partial output.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -286,13 +291,19 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// Symbolic links are **followed**: the link target's contents are stored
     /// and the entry is registered as a regular file. Metadata (permissions,
-    /// UID/GID, mtime) is likewise read from the link target via
-    /// [`EntryOptions::from_path_following`].
+    /// UID/GID, mtime) is likewise read from the link target.
+    ///
+    /// Only regular files are accepted. Directories, FIFOs, sockets, and device
+    /// nodes are rejected up front with [`ZipError::InvalidInput`], because
+    /// opening a FIFO or device node can block indefinitely (waiting for a
+    /// peer) and a directory would otherwise fail only later, mid-stream, with
+    /// `EISDIR`.
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if the file cannot be opened, if metadata cannot
-    /// be read, or if writing to the archive fails.
+    /// Returns [`ZipError::InvalidInput`] if `path` is not a regular file, or
+    /// [`ZipError`] if metadata cannot be read, the file cannot be opened, or
+    /// writing to the archive fails.
     ///
     /// # Example
     ///
@@ -308,9 +319,17 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # }
     /// ```
     pub async fn add_file(&mut self, name: &str, path: &Path) -> Result<(), ZipError> {
-        let options = EntryOptions::from_path_following(path)
-            .await
-            .map_err(ZipError::Io)?;
+        // Read metadata once: reject anything that is not a regular file before
+        // opening it. `File::open` on a FIFO blocks until a writer connects
+        // (occupying a blocking-pool thread), and a directory opens fine but
+        // only fails during the read with `EISDIR`.
+        let meta = tokio::fs::metadata(path).await.map_err(ZipError::Io)?;
+        if !meta.is_file() {
+            return Err(ZipError::InvalidInput {
+                reason: "add_file requires a regular file; use add_directory or add_symlink for other entry types",
+            });
+        }
+        let options = EntryOptions::from_metadata(&meta);
         let file = tokio::fs::File::open(path).await.map_err(ZipError::Io)?;
         self.add_reader(name, file, &options).await
     }
@@ -498,6 +517,20 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// After calling `finish`, the `ZipWriter` is consumed and the inner
     /// writer is returned.
     ///
+    /// # Failure and recovery
+    ///
+    /// Because `finish` takes `self` by value, [`abort`](Self::abort) cannot be
+    /// called afterwards. If a write or the final shutdown fails **after** the
+    /// inner writer has been taken (i.e. while emitting the Central Directory,
+    /// ZIP64 records, or EOCDR), that writer is dropped together with this
+    /// future and is **not** returned to the caller. A streaming ZIP has no way
+    /// back, so the partially written archive cannot be repaired, and for a
+    /// non-file sink (e.g. a `TcpStream`) the connection is lost with it.
+    ///
+    /// If you need the sink back on failure, do not rely on `finish` for
+    /// cleanup: validate inputs before this point, and own the sink outside the
+    /// writer (or use a seekable writer) if you must recover it.
+    ///
     /// # Errors
     ///
     /// Returns [`ZipError`] if an entry writer is still active or the writer is
@@ -587,6 +620,27 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 /// Backslashes are normalized to `/` (so Windows-style paths are caught),
 /// then the name is rejected if it is absolute or contains a `..` component
 /// or a Windows drive prefix.
+///
+/// # Scope
+///
+/// This guard is deliberately limited to **path-escape** safety, and it is
+/// judged against every OS the archive might later be unpacked on — not just
+/// the one running this code. Two consequences are worth spelling out:
+///
+/// * A single ASCII letter followed by `:` in the first path component is
+///   treated as a Windows drive prefix and rejected. On Windows,
+///   `root.join("C:/evil")` resolves to the absolute path `C:\evil`, escaping
+///   the extraction root, so this check stays unconditional even though it also
+///   rejects names that are perfectly legal on Unix, such as `a:b/c.txt`.
+///   (Only the second byte is inspected, so only a one-letter prefix like that
+///   is affected; `ab:c.txt` is allowed.)
+/// * Windows *filename normalization* is intentionally **not** handled: names
+///   with trailing spaces or dots, and DOS device names (`CON`, `PRN`, `AUX`,
+///   `NUL`, `COM1`…`LPT9`), are accepted verbatim. They cannot escape the
+///   extraction root; at worst they behave oddly in some Windows extractors,
+///   and rejecting them by default would break archives of legitimate Unix
+///   files (which may well be named `CON` or `foo.`). Callers that need stricter
+///   Windows-name handling should validate entry names before passing them in.
 fn sanitize_entry_name(name: &str) -> Result<String, ZipError> {
     let name = name.replace('\\', "/");
     if name.is_empty() {
@@ -986,6 +1040,51 @@ mod tests {
                 matches!(err, ZipError::InvalidInput { .. }),
                 "expected InvalidInput for {target:?}, got {err}"
             );
+        }
+    }
+
+    /// `add_file` must reject anything that is not a regular file up front,
+    /// rather than opening it: a FIFO open blocks forever waiting for a peer,
+    /// and a directory only fails later, mid-read, with `EISDIR`.
+    #[tokio::test]
+    async fn test_add_file_rejects_non_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+
+        // A directory is not a regular file.
+        let err = zip.add_file("dir", dir.path()).await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::InvalidInput { .. }),
+            "expected InvalidInput for a directory, got {err}"
+        );
+
+        #[cfg(unix)]
+        {
+            // A symlink that resolves to a directory is followed and rejected.
+            let dirlink = dir.path().join("dirlink");
+            std::os::unix::fs::symlink(dir.path(), &dirlink).unwrap();
+            let err = zip.add_file("dirlink", &dirlink).await.unwrap_err();
+            assert!(
+                matches!(err, ZipError::InvalidInput { .. }),
+                "expected InvalidInput for a symlink to a directory, got {err}"
+            );
+
+            // A FIFO: rejected by the metadata check, so no blocking `open`.
+            // Skip if `mkfifo` is unavailable so the test stays portable.
+            let fifo = dir.path().join("pipe");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if made {
+                let err = zip.add_file("pipe", &fifo).await.unwrap_err();
+                assert!(
+                    matches!(err, ZipError::InvalidInput { .. }),
+                    "expected InvalidInput for a FIFO, got {err}"
+                );
+            }
         }
     }
 

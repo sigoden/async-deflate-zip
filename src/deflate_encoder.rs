@@ -190,17 +190,14 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
 
             // consumed == 0: the output buffer was full. Drain the compressed
             // output to the inner writer. If the inner writer would block,
-            // surface Pending — safe here because no input has been consumed.
+            // surface Pending — safe here because `consumed` is necessarily 0
+            // at this point (the `consumed > 0` case returned above), so no
+            // input is lost or duplicated on the retry.
             if self.out_pos < self.out_len {
                 match self.as_mut().poll_drain(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => {
-                        if consumed > 0 {
-                            return Poll::Ready(Ok(consumed));
-                        }
-                        return Poll::Pending;
-                    }
+                    Poll::Pending => return Poll::Pending,
                 }
             }
 
@@ -208,6 +205,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                 // deflate encoder stalled — the compressor is buffering
                 // internally with FlushCompress::None. Try a sync flush
                 // to force output before giving up.
+                //
+                // Cost: a sync flush ends the current block and appends an
+                // empty stored block (5 bytes: `00 00 00 FF FF`), so if this
+                // path is hit repeatedly the compression ratio drops slightly.
+                // It is deliberate: there is no I/O to wait on here, so
+                // returning `Pending` would stall without anything to wake it.
+                // Flushing guarantees forward progress.
                 let flushed = {
                     let this = self.as_mut().get_mut();
                     let (_, _status) = this.do_compress(&[], FlushCompress::Sync)?;

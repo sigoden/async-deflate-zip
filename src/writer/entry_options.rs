@@ -54,7 +54,7 @@ impl EntryOptions {
     /// On Unix, permission bits are extracted from the file's mode and
     /// UID/GID from the file's owner. On non-Unix platforms, permissions
     /// default to `None` and UID/GID to `None`.
-    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+    pub(crate) fn from_metadata(meta: &std::fs::Metadata) -> Self {
         Self {
             mtime: meta.modified().unwrap_or_else(|_| SystemTime::now()),
             #[cfg(unix)]

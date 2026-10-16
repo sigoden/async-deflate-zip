@@ -72,26 +72,54 @@ pub(crate) fn assert_archive_comment(buf: &[u8], expected: &str) {
     assert_eq!(archive.comment(), expected.as_bytes(), "archive comment");
 }
 
-/// Assert that an entry's extra data contains a specific tag (e.g. b"UT" or b"Ux").
+/// Return the two-byte little-endian header id of a parsed extra field.
+fn extra_field_tag(field: &zip::ExtraField) -> [u8; 2] {
+    let header_id = match field {
+        zip::ExtraField::Zip64ExtendedInformation(_) => 0x0001,
+        zip::ExtraField::Ntfs(_) => 0x000a,
+        zip::ExtraField::ExtendedTimestamp(_) => 0x5455,
+        zip::ExtraField::UnicodeComment(_) => 0x6375,
+        zip::ExtraField::UnicodePath(_) => 0x7075,
+        zip::ExtraField::DataStreamAlignment(_) => 0xa11e,
+        zip::ExtraField::Custom(custom) => custom.header_id,
+        _ => 0,
+    };
+    header_id.to_le_bytes()
+}
+
+/// Assert that an entry's central-directory extra data contains a specific tag
+/// (the two-byte little-endian header id, e.g. `b"UT"` for `0x5455`).
+///
+/// Inspects the parsed [`zip::ExtraField`]s directly: `ZipFile::extra_data()`
+/// re-serializes the fields and silently drops some of them (such as the
+/// extended timestamp), so it cannot be used to detect them.
 pub(crate) fn assert_extra_has_tag(buf: &[u8], name: &str, tag: &[u8]) {
     let mut archive = open_zip(buf);
     let entry = archive
         .by_name(name)
         .unwrap_or_else(|_| panic!("entry {name:?} not found"));
-    let extra = entry.extra_data().expect("entry has no extra data");
+    let tags: Vec<[u8; 2]> = entry.extra_data_fields().map(extra_field_tag).collect();
     assert!(
-        extra.windows(2).any(|w| w == tag),
-        "extra data for {name:?} should contain tag {tag:?}, got {extra:02x?}"
+        tags.iter().any(|t| t.as_slice() == tag),
+        "extra data for {name:?} should contain tag {tag:?}, got {tags:?}"
     );
 }
 
 /// Assert that an entry's unix mode matches expected (file type + permissions).
+///
+/// Reads the raw external file attributes instead of [`zip::read::ZipFile::unix_mode`]:
+/// the `zip` crate strips the setuid/setgid/sticky bits when reporting a mode, so
+/// it could not verify that those bits are preserved.
 pub(crate) fn assert_unix_mode(buf: &[u8], name: &str, expected: u32) {
     let mut archive = open_zip(buf);
     let entry = archive
         .by_name(name)
         .unwrap_or_else(|_| panic!("entry {name:?} not found"));
-    assert_eq!(entry.unix_mode(), Some(expected), "unix mode for {name:?}");
+    assert_eq!(
+        entry.external_attributes() >> 16,
+        expected,
+        "unix mode for {name:?}"
+    );
 }
 
 /// Assert that an entry's last_modified matches the expected MS-DOS local time.

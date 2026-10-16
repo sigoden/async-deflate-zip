@@ -19,10 +19,10 @@ pub(crate) struct LocalFileHeader {
 impl LocalFileHeader {
     pub(crate) fn new(
         name: &str,
-        comment: Option<&[u8]>,
         method: u16,
         mtime: SystemTime,
         use_data_desc: bool,
+        comment: Option<&[u8]>,
     ) -> Self {
         let (time, date) = system_time_to_ms_dos(mtime);
         let mut flags = if use_data_desc { FLAG_DATA_DESC } else { 0 };
@@ -124,10 +124,10 @@ mod tests {
     fn test_lfh_normal_case() {
         let lfh = LocalFileHeader::new(
             "test.txt",
-            None,
             METHOD_DEFLATE,
             SystemTime::UNIX_EPOCH,
             true,
+            None,
         );
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_lfh_no_data_desc() {
-        let lfh = LocalFileHeader::new("dir/", None, METHOD_STORED, SystemTime::UNIX_EPOCH, false);
+        let lfh = LocalFileHeader::new("dir/", METHOD_STORED, SystemTime::UNIX_EPOCH, false, None);
         let mut buf = Vec::new();
         lfh.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), 34);
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn test_lfh_field_too_long() {
         let name = "a".repeat(65536);
-        let lfh = LocalFileHeader::new(&name, None, METHOD_STORED, SystemTime::UNIX_EPOCH, true);
+        let lfh = LocalFileHeader::new(&name, METHOD_STORED, SystemTime::UNIX_EPOCH, true, None);
         let mut buf = Vec::new();
         let result = lfh.write_to(&mut buf);
         assert!(result.is_err());
@@ -173,10 +173,10 @@ mod tests {
         // ASCII name + non-ASCII comment: EFS (bit 11) must still be set.
         let lfh = LocalFileHeader::new(
             "ascii.txt",
-            Some("日本語".as_bytes()),
             METHOD_DEFLATE,
             SystemTime::UNIX_EPOCH,
             true,
+            Some("日本語".as_bytes()),
         );
         assert!(
             lfh.flags & FLAG_UTF8 != 0,
@@ -186,10 +186,10 @@ mod tests {
         // ASCII name + ASCII comment: flag must stay clear.
         let lfh = LocalFileHeader::new(
             "ascii.txt",
-            Some("plain".as_bytes()),
             METHOD_DEFLATE,
             SystemTime::UNIX_EPOCH,
             true,
+            Some("plain".as_bytes()),
         );
         assert!(
             lfh.flags & FLAG_UTF8 == 0,

@@ -51,7 +51,7 @@ impl StoredEntry {
         } else {
             0o100000 // S_IFREG
         };
-        let external_file_attributes = match (self.unix_permissions, self.is_symlink) {
+        let mut external_file_attributes = match (self.unix_permissions, self.is_symlink) {
             (Some(mode), _) => (mode | file_type_bit) << 16,
             (None, true) => (zip_format::DEFAULT_SYMLINK_PERM | file_type_bit) << 16,
             (None, false) => {
@@ -63,6 +63,11 @@ impl StoredEntry {
                 (default_mode | file_type_bit) << 16
             }
         };
+        // Also set the MS-DOS directory attribute in the low word, which some
+        // tools use (instead of the trailing '/') to detect directory entries.
+        if self.is_directory {
+            external_file_attributes |= zip_format::MSDOS_ATTR_DIRECTORY;
+        }
 
         let mut flags = if self.is_directory {
             0
@@ -142,6 +147,11 @@ mod tests {
         assert_eq!(cd.method, zip_format::METHOD_STORED);
         assert_eq!(cd.version_needed, zip_format::VERSION_STORED);
         assert_eq!(cd.version_made_by, zip_format::VERSION_UNIX);
+        assert_eq!(
+            cd.external_file_attributes & zip_format::MSDOS_ATTR_DIRECTORY,
+            0,
+            "regular files must not set the MS-DOS directory attribute"
+        );
         assert!(
             cd.extra.is_empty(),
             "expected no extra fields when unix_mtime=0 and no uid_gid"
@@ -170,9 +180,40 @@ mod tests {
             "expected S_IFDIR + 0o755, got {:06o}",
             attrs >> 16
         );
+        assert_ne!(
+            attrs & zip_format::MSDOS_ATTR_DIRECTORY,
+            0,
+            "directory entries must set the MS-DOS directory attribute"
+        );
         assert!(
             cd.extra.windows(2).any(|w| w == [0x75, 0x78]),
             "CD extra should contain 0x7875 (Ux) tag for Unix entries"
+        );
+    }
+
+    #[test]
+    fn test_to_central_dir_entry_utf8_flag_considers_comment() {
+        // ASCII name but non-ASCII comment: the EFS flag still applies.
+        let entry = StoredEntry {
+            name: "ascii.txt".to_string(),
+            comment: Some("Grüße".as_bytes().to_vec()),
+            ..default_entry()
+        };
+        assert_ne!(
+            entry.to_central_dir_entry().flags & zip_format::FLAG_UTF8,
+            0,
+            "non-ASCII comment must set the UTF-8 flag"
+        );
+
+        // ASCII name and comment: flag stays clear.
+        let entry = StoredEntry {
+            name: "ascii.txt".to_string(),
+            comment: Some(b"plain".to_vec()),
+            ..default_entry()
+        };
+        assert_eq!(
+            entry.to_central_dir_entry().flags & zip_format::FLAG_UTF8,
+            0
         );
     }
 

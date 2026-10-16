@@ -56,6 +56,26 @@ pub(crate) fn validate_comment(comment: &[u8]) -> Result<(), ZipError> {
     Ok(())
 }
 
+/// Validate a symbolic link target.
+///
+/// The target is stored as the entry's data, so it is not length-limited like
+/// a name. It must not be empty — an empty symlink target cannot be created —
+/// and must not contain a NUL byte, which the underlying OS symlink call would
+/// reject.
+pub(crate) fn validate_symlink_target(target: &str) -> Result<(), ZipError> {
+    if target.is_empty() {
+        return Err(ZipError::InvalidInput {
+            reason: "symlink target is empty",
+        });
+    }
+    if target.as_bytes().contains(&0) {
+        return Err(ZipError::InvalidInput {
+            reason: "symlink target contains NUL byte",
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +137,31 @@ mod tests {
             matches!(&err, ZipError::FieldTooLong { field, len, max }
                 if *field == "comment" && *len == MAX_FIELD_LEN + 1 && *max == MAX_FIELD_LEN),
             "expected FieldTooLong, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_symlink_target_ok() {
+        assert!(validate_symlink_target("target.txt").is_ok());
+        assert!(validate_symlink_target("../dir/file").is_ok());
+        assert!(validate_symlink_target("/absolute/path").is_ok());
+    }
+
+    #[test]
+    fn test_validate_symlink_target_empty() {
+        let err = validate_symlink_target("").unwrap_err();
+        assert!(
+            matches!(&err, ZipError::InvalidInput { reason } if *reason == "symlink target is empty"),
+            "expected InvalidInput, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_symlink_target_nul() {
+        let err = validate_symlink_target("bad\0target").unwrap_err();
+        assert!(
+            matches!(&err, ZipError::InvalidInput { reason } if *reason == "symlink target contains NUL byte"),
+            "expected InvalidInput, got {err}"
         );
     }
 }

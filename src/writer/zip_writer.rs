@@ -4,11 +4,12 @@ use super::stored_entry::StoredEntry;
 
 use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
-use crate::validate::{validate_comment, validate_input};
+use crate::validate::{validate_comment, validate_input, validate_symlink_target};
 use crate::zip_format;
 
 use crate::CompressionLevel;
 
+use std::fmt;
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
@@ -45,6 +46,19 @@ pub struct ZipWriter<W: AsyncWrite + Unpin> {
     pub(crate) poisoned: bool,
     comment: Option<Vec<u8>>,
     pub(crate) scratch: Vec<u8>,
+}
+
+impl<W: AsyncWrite + Unpin> fmt::Debug for ZipWriter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZipWriter")
+            .field("entries", &self.entries.len())
+            .field("level", &self.level)
+            .field("pos", &self.pos)
+            .field("poisoned", &self.poisoned)
+            .field("comment_len", &self.comment.as_ref().map(Vec::len))
+            .field("inner", &self.inner.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl<W: AsyncWrite + Unpin> ZipWriter<W> {
@@ -86,6 +100,11 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// The comment is embedded in the End of Central Directory Record and can
     /// be up to 65535 bytes when encoded as UTF-8. Returns `self` for chaining.
     ///
+    /// The length is **not** checked here: an over-long comment is reported as
+    /// [`ZipError::FieldTooLong`] only by [`finish`](Self::finish), by which
+    /// time the entry data has already been written to the sink. Check the
+    /// length up front if the sink must not be left with partial output.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -100,15 +119,49 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         self
     }
 
-    /// Take ownership of the inner writer, returning an error if it's already taken.
+    /// Take ownership of the inner writer, returning an error if it's already
+    /// taken.
+    ///
+    /// While the writer is out, the `ZipWriter` is marked as poisoned. The
+    /// writer is moved into the caller (or into an [`EntryWriter`]), so if the
+    /// surrounding future is cancelled at an `.await` — e.g. via
+    /// `tokio::time::timeout`, `select!`, or `JoinHandle::abort` — the writer
+    /// is dropped with that future and can never be recovered. Marking it
+    /// poisoned up front makes that state observable as [`ZipError::Poisoned`]
+    /// instead of the misleading [`ZipError::WriterBusy`]. Every site that
+    /// hands the writer back must clear the flag again.
     fn take_inner(&mut self) -> Result<W, ZipError> {
-        self.inner.take().ok_or({
-            if self.poisoned {
-                ZipError::Poisoned
-            } else {
-                ZipError::WriterBusy
+        match self.inner.take() {
+            Some(inner) => {
+                self.poisoned = true;
+                Ok(inner)
             }
-        })
+            None if self.poisoned => Err(ZipError::Poisoned),
+            None => Err(ZipError::WriterBusy),
+        }
+    }
+
+    /// Serialize a header into `scratch` and write it to `inner`.
+    ///
+    /// Both steps consume the `scratch` buffer. If either fails, `inner` has
+    /// already been moved out of `self` and cannot be recovered, so the writer
+    /// is marked as poisoned: later calls then report [`ZipError::Poisoned`]
+    /// instead of the misleading [`ZipError::WriterBusy`].
+    async fn write_scratch(
+        &mut self,
+        inner: &mut W,
+        write_to: impl FnOnce(&mut Vec<u8>) -> Result<(), ZipError>,
+    ) -> Result<(), ZipError> {
+        self.scratch.clear();
+        if let Err(e) = write_to(&mut self.scratch) {
+            self.poisoned = true;
+            return Err(e);
+        }
+        if let Err(e) = inner.write_all(&self.scratch).await {
+            self.poisoned = true;
+            return Err(ZipError::Io(e));
+        }
+        Ok(())
     }
 
     /// Start a new file entry and return an [`EntryWriter`] for streaming data.
@@ -161,17 +214,13 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let lfh = zip_format::LocalFileHeader::new(
             &name,
-            options.comment(),
             method,
             *options.mtime(),
             true,
+            options.comment(),
         );
-        self.scratch.clear();
-        lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await.map_err(|e| {
-            self.poisoned = true;
-            ZipError::Io(e)
-        })?;
+        self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
+            .await?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
@@ -242,13 +291,19 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// Symbolic links are **followed**: the link target's contents are stored
     /// and the entry is registered as a regular file. Metadata (permissions,
-    /// UID/GID, mtime) is likewise read from the link target via
-    /// [`EntryOptions::from_path_following`].
+    /// UID/GID, mtime) is likewise read from the link target.
+    ///
+    /// Only regular files are accepted. Directories, FIFOs, sockets, and device
+    /// nodes are rejected up front with [`ZipError::InvalidInput`], because
+    /// opening a FIFO or device node can block indefinitely (waiting for a
+    /// peer) and a directory would otherwise fail only later, mid-stream, with
+    /// `EISDIR`.
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if the file cannot be opened, if metadata cannot
-    /// be read, or if writing to the archive fails.
+    /// Returns [`ZipError::InvalidInput`] if `path` is not a regular file, or
+    /// [`ZipError`] if metadata cannot be read, the file cannot be opened, or
+    /// writing to the archive fails.
     ///
     /// # Example
     ///
@@ -264,9 +319,17 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     /// # }
     /// ```
     pub async fn add_file(&mut self, name: &str, path: &Path) -> Result<(), ZipError> {
-        let options = EntryOptions::from_path_following(path)
-            .await
-            .map_err(ZipError::Io)?;
+        // Read metadata once: reject anything that is not a regular file before
+        // opening it. `File::open` on a FIFO blocks until a writer connects
+        // (occupying a blocking-pool thread), and a directory opens fine but
+        // only fails during the read with `EISDIR`.
+        let meta = tokio::fs::metadata(path).await.map_err(ZipError::Io)?;
+        if !meta.is_file() {
+            return Err(ZipError::InvalidInput {
+                reason: "add_file requires a regular file; use add_directory or add_symlink for other entry types",
+            });
+        }
+        let options = EntryOptions::from_metadata(&meta);
         let file = tokio::fs::File::open(path).await.map_err(ZipError::Io)?;
         self.add_reader(name, file, &options).await
     }
@@ -308,17 +371,13 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 
         let lfh = zip_format::LocalFileHeader::new(
             &name,
-            options.comment(),
             zip_format::METHOD_STORED,
             *options.mtime(),
             false,
+            options.comment(),
         );
-        self.scratch.clear();
-        lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await.map_err(|e| {
-            self.poisoned = true;
-            ZipError::Io(e)
-        })?;
+        self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
+            .await?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
@@ -340,6 +399,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         });
 
         self.inner = Some(inner);
+        self.poisoned = false;
         Ok(())
     }
 
@@ -353,9 +413,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`ZipError`] if the writer is poisoned, or if writing the
-    /// Local File Header, symlink target, or Data Descriptor fails (I/O error
-    /// or field too long).
+    /// Returns [`ZipError::InvalidInput`] if the name is invalid, or the target
+    /// is empty or contains a NUL byte. Returns [`ZipError`] if the writer is
+    /// poisoned, or if writing the Local File Header, symlink target, or Data
+    /// Descriptor fails (I/O error or field too long).
     ///
     /// # Example
     ///
@@ -376,32 +437,34 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
         options: &EntryOptions,
     ) -> Result<(), ZipError> {
         let name = sanitize_entry_name(name)?;
+        if name.ends_with('/') {
+            return Err(ZipError::InvalidInput {
+                reason: "symlink entry name must not end with '/'",
+            });
+        }
         validate_input(&name, options.comment())?;
+        validate_symlink_target(target)?;
 
         let mut inner = self.take_inner()?;
 
         let lfh = zip_format::LocalFileHeader::new(
             &name,
-            options.comment(),
             zip_format::METHOD_STORED,
             *options.mtime(),
             true,
+            options.comment(),
         );
-        self.scratch.clear();
-        lfh.write_to(&mut self.scratch)?;
-        inner.write_all(&self.scratch).await.map_err(|e| {
-            self.poisoned = true;
-            ZipError::Io(e)
-        })?;
+        self.write_scratch(&mut inner, |buf| lfh.write_to(buf))
+            .await?;
         let offset = self.pos;
         self.pos += self.scratch.len() as u64;
 
         // Write the symlink target as stored (uncompressed) data
         let target_bytes = target.as_bytes();
-        inner.write_all(target_bytes).await.map_err(|e| {
+        if let Err(e) = inner.write_all(target_bytes).await {
             self.poisoned = true;
-            ZipError::Io(e)
-        })?;
+            return Err(ZipError::Io(e));
+        }
         self.pos += target_bytes.len() as u64;
 
         // CRC-32 of the target path
@@ -441,6 +504,7 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
             comment: options.comment().map(|c| c.to_vec()),
         });
         self.inner = Some(inner);
+        self.poisoned = false;
         Ok(())
     }
 
@@ -452,6 +516,20 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// After calling `finish`, the `ZipWriter` is consumed and the inner
     /// writer is returned.
+    ///
+    /// # Failure and recovery
+    ///
+    /// Because `finish` takes `self` by value, [`abort`](Self::abort) cannot be
+    /// called afterwards. If a write or the final shutdown fails **after** the
+    /// inner writer has been taken (i.e. while emitting the Central Directory,
+    /// ZIP64 records, or EOCDR), that writer is dropped together with this
+    /// future and is **not** returned to the caller. A streaming ZIP has no way
+    /// back, so the partially written archive cannot be repaired, and for a
+    /// non-file sink (e.g. a `TcpStream`) the connection is lost with it.
+    ///
+    /// If you need the sink back on failure, do not rely on `finish` for
+    /// cleanup: validate inputs before this point, and own the sink outside the
+    /// writer (or use a seekable writer) if you must recover it.
     ///
     /// # Errors
     ///
@@ -523,8 +601,10 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
     ///
     /// Returns [`ZipError::WriterBusy`] if an [`EntryWriter`] is still active
     /// (the inner writer has been moved into that entry), or
-    /// [`ZipError::Poisoned`] if the writer is in a poisoned state (an entry
-    /// was dropped without finishing).
+    /// [`ZipError::Poisoned`] if the writer is in a poisoned state — an entry
+    /// was dropped without finishing, or an async operation was cancelled
+    /// while the inner writer was checked out (the writer is dropped with the
+    /// cancelled future and can no longer be recovered).
     pub fn abort(self) -> Result<W, ZipError> {
         self.inner.ok_or(if self.poisoned {
             ZipError::Poisoned
@@ -540,6 +620,27 @@ impl<W: AsyncWrite + Unpin> ZipWriter<W> {
 /// Backslashes are normalized to `/` (so Windows-style paths are caught),
 /// then the name is rejected if it is absolute or contains a `..` component
 /// or a Windows drive prefix.
+///
+/// # Scope
+///
+/// This guard is deliberately limited to **path-escape** safety, and it is
+/// judged against every OS the archive might later be unpacked on — not just
+/// the one running this code. Two consequences are worth spelling out:
+///
+/// * A single ASCII letter followed by `:` in the first path component is
+///   treated as a Windows drive prefix and rejected. On Windows,
+///   `root.join("C:/evil")` resolves to the absolute path `C:\evil`, escaping
+///   the extraction root, so this check stays unconditional even though it also
+///   rejects names that are perfectly legal on Unix, such as `a:b/c.txt`.
+///   (Only the second byte is inspected, so only a one-letter prefix like that
+///   is affected; `ab:c.txt` is allowed.)
+/// * Windows *filename normalization* is intentionally **not** handled: names
+///   with trailing spaces or dots, and DOS device names (`CON`, `PRN`, `AUX`,
+///   `NUL`, `COM1`…`LPT9`), are accepted verbatim. They cannot escape the
+///   extraction root; at worst they behave oddly in some Windows extractors,
+///   and rejecting them by default would break archives of legitimate Unix
+///   files (which may well be named `CON` or `foo.`). Callers that need stricter
+///   Windows-name handling should validate entry names before passing them in.
 fn sanitize_entry_name(name: &str) -> Result<String, ZipError> {
     let name = name.replace('\\', "/");
     if name.is_empty() {
@@ -572,7 +673,40 @@ mod tests {
     use super::*;
     use crate::CompressionLevel;
     use crate::test_utils::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use tokio::io::AsyncWriteExt;
+
+    /// A writer that fails the `fail_on`-th `poll_write` (1-based), then
+    /// succeeds on subsequent calls.
+    #[derive(Debug)]
+    struct FailingWriter {
+        calls: usize,
+        fail_on: usize,
+    }
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.calls += 1;
+            if self.calls == self.fail_on {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "boom",
+                )));
+            }
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn test_zip_write_single_file() {
@@ -866,6 +1000,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reject_symlink_name_with_trailing_slash() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let err = zip
+            .add_symlink("link/", "target", &EntryOptions::symlink())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ZipError::InvalidInput { .. }),
+            "expected InvalidInput, got {err}"
+        );
+    }
+
+    /// `start_file`'s `Ok` type (`EntryWriter`) must implement `Debug` without
+    /// requiring `W: Debug`, so `unwrap_err()` compiles.
+    #[tokio::test]
+    async fn test_start_file_error_is_debuggable() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        let err = zip
+            .start_file("../evil", &EntryOptions::file())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ZipError::InvalidInput { .. }));
+    }
+
+    /// An empty or NUL-containing symlink target must be rejected up front.
+    #[tokio::test]
+    async fn test_reject_invalid_symlink_target() {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+        for target in ["", "bad\0target"] {
+            let err = zip
+                .add_symlink("link", target, &EntryOptions::symlink())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ZipError::InvalidInput { .. }),
+                "expected InvalidInput for {target:?}, got {err}"
+            );
+        }
+    }
+
+    /// `add_file` must reject anything that is not a regular file up front,
+    /// rather than opening it: a FIFO open blocks forever waiting for a peer,
+    /// and a directory only fails later, mid-read, with `EISDIR`.
+    #[tokio::test]
+    async fn test_add_file_rejects_non_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(&mut buf);
+
+        // A directory is not a regular file.
+        let err = zip.add_file("dir", dir.path()).await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::InvalidInput { .. }),
+            "expected InvalidInput for a directory, got {err}"
+        );
+
+        #[cfg(unix)]
+        {
+            // A symlink that resolves to a directory is followed and rejected.
+            let dirlink = dir.path().join("dirlink");
+            std::os::unix::fs::symlink(dir.path(), &dirlink).unwrap();
+            let err = zip.add_file("dirlink", &dirlink).await.unwrap_err();
+            assert!(
+                matches!(err, ZipError::InvalidInput { .. }),
+                "expected InvalidInput for a symlink to a directory, got {err}"
+            );
+
+            // A FIFO: rejected by the metadata check, so no blocking `open`.
+            // Skip if `mkfifo` is unavailable so the test stays portable.
+            let fifo = dir.path().join("pipe");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if made {
+                let err = zip.add_file("pipe", &fifo).await.unwrap_err();
+                assert!(
+                    matches!(err, ZipError::InvalidInput { .. }),
+                    "expected InvalidInput for a FIFO, got {err}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_accept_safe_names() {
         let mut buf = Vec::new();
         let mut zip = ZipWriter::new(&mut buf);
@@ -876,5 +1099,53 @@ mod tests {
         }
         zip.finish().await.unwrap();
         assert_entry_count(&buf, 4);
+    }
+
+    /// A failed Local File Header write moves the inner writer out of the
+    /// `ZipWriter` and drops it. The writer must be poisoned so later calls
+    /// report `Poisoned` rather than the misleading `WriterBusy`.
+    #[tokio::test]
+    async fn test_header_write_error_poisons_writer() {
+        // First `poll_write` (the Local File Header) fails.
+        let mut zip = ZipWriter::new(FailingWriter {
+            calls: 0,
+            fail_on: 1,
+        });
+        let err = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .expect_err("start_file should fail");
+        assert!(matches!(err, ZipError::Io(_)), "expected Io, got {err}");
+
+        let err = zip.finish().await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned, got {err}"
+        );
+    }
+
+    /// Same as above, but for a failure while finalizing the deflate stream in
+    /// `EntryWriter::finish`.
+    #[tokio::test]
+    async fn test_entry_finish_error_poisons_writer() {
+        // The Local File Header succeeds (call 1); the deflate output written
+        // during `entry.finish()` fails (call 2).
+        let mut zip = ZipWriter::new(FailingWriter {
+            calls: 0,
+            fail_on: 2,
+        });
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(&vec![b'A'; 4096]).await.unwrap();
+        let err = entry.finish().await.unwrap_err();
+        assert!(matches!(err, ZipError::Io(_)), "expected Io, got {err}");
+
+        let err = zip.finish().await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned, got {err}"
+        );
     }
 }

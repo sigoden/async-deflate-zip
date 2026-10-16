@@ -62,37 +62,74 @@ pub(crate) const DEFAULT_DIR_PERM: u32 = 0o755;
 /// Default Unix permissions for symlink files.
 pub(crate) const DEFAULT_SYMLINK_PERM: u32 = 0o777;
 
+/// MS-DOS "directory" attribute bit, stored in the low word of the external
+/// file attributes field (APPNOTE 4.4.2.2).
+pub(crate) const MSDOS_ATTR_DIRECTORY: u32 = 0x10;
+
 /// Whether a data descriptor needs ZIP64 extensions.
 ///
-/// ZIP64 is required when compressed or uncompressed size exceeds `U32_MAX`.
-/// Unlike entry headers, data descriptors do not carry a local header offset.
+/// ZIP64 is required when the compressed or uncompressed size reaches
+/// `U32_MAX`: `0xFFFFFFFF` is the ZIP64 marker value, so it cannot be stored
+/// literally (readers would look for a ZIP64 extended information field that
+/// is not there). Unlike entry headers, data descriptors do not carry a local
+/// header offset.
 pub(crate) const fn data_descriptor_needs_zip64(
     compressed_size: u64,
     uncompressed_size: u64,
 ) -> bool {
-    compressed_size > U32_MAX || uncompressed_size > U32_MAX
+    compressed_size >= U32_MAX || uncompressed_size >= U32_MAX
 }
 
 /// Whether an individual entry needs ZIP64 extensions.
 ///
 /// ZIP64 is required when any of the three 32-bit fields (compressed size,
-/// uncompressed size, local header offset) exceeds `U32_MAX`.
+/// uncompressed size, local header offset) reaches `U32_MAX`, which is the
+/// ZIP64 marker value and therefore cannot be stored literally.
 pub(crate) const fn entry_needs_zip64(
     compressed_size: u64,
     uncompressed_size: u64,
     local_header_offset: u64,
 ) -> bool {
-    compressed_size > U32_MAX || uncompressed_size > U32_MAX || local_header_offset > U32_MAX
+    compressed_size >= U32_MAX || uncompressed_size >= U32_MAX || local_header_offset >= U32_MAX
 }
 
 /// Whether the archive itself needs ZIP64 records (Zip64Eocdr + Locator).
 ///
-/// ZIP64 is required when the total entry count reaches 0xFFFF (which is
-/// otherwise indistinguishable from the ZIP64 sentinel stored in the 16-bit
-/// EOCDR fields), or the Central Directory size or offset exceeds `U32_MAX`.
+/// ZIP64 is required when the total entry count reaches 0xFFFF or the Central
+/// Directory size or offset reaches `U32_MAX`, since those are the marker
+/// values used in the 16-/32-bit EOCDR fields.
 pub(crate) const fn archive_needs_zip64(total_entries: u64, cd_size: u64, cd_offset: u64) -> bool {
-    total_entries >= U16_ENTRY_MAX || cd_size > U32_MAX || cd_offset > U32_MAX
+    total_entries >= U16_ENTRY_MAX || cd_size >= U32_MAX || cd_offset >= U32_MAX
 }
 
 /// Data Descriptor signature: `PK\x07\x08` (`0x08074b50`).
 pub(crate) const DD_SIG: u32 = 0x08074b50;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zip64_thresholds_are_inclusive() {
+        // `0xFFFFFFFF` (and `0xFFFF` for the entry count) is the ZIP64 marker
+        // value, so reaching it must trigger ZIP64 rather than being written
+        // literally.
+        assert!(entry_needs_zip64(U32_MAX, 0, 0));
+        assert!(entry_needs_zip64(0, U32_MAX, 0));
+        assert!(entry_needs_zip64(0, 0, U32_MAX));
+        assert!(data_descriptor_needs_zip64(U32_MAX, 0));
+        assert!(data_descriptor_needs_zip64(0, U32_MAX));
+        assert!(archive_needs_zip64(0, U32_MAX, 0));
+        assert!(archive_needs_zip64(0, 0, U32_MAX));
+        assert!(archive_needs_zip64(U16_ENTRY_MAX, 0, 0));
+
+        // Just below the marker does not need ZIP64.
+        assert!(!entry_needs_zip64(U32_MAX - 1, U32_MAX - 1, U32_MAX - 1));
+        assert!(!data_descriptor_needs_zip64(U32_MAX - 1, U32_MAX - 1));
+        assert!(!archive_needs_zip64(
+            U16_ENTRY_MAX - 1,
+            U32_MAX - 1,
+            U32_MAX - 1
+        ));
+    }
+}

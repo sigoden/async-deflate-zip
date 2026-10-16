@@ -190,7 +190,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
 
             // consumed == 0: the output buffer was full. Drain the compressed
             // output to the inner writer. If the inner writer would block,
-            // surface Pending — safe here because no input has been consumed.
+            // surface Pending — safe here because `consumed` is necessarily 0
+            // at this point (the `consumed > 0` case returned above), so no
+            // input is lost or duplicated on the retry.
             if self.out_pos < self.out_len {
                 match self.as_mut().poll_drain(cx) {
                     Poll::Ready(Ok(())) => {}
@@ -203,6 +205,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                 // deflate encoder stalled — the compressor is buffering
                 // internally with FlushCompress::None. Try a sync flush
                 // to force output before giving up.
+                //
+                // Cost: a sync flush ends the current block and appends an
+                // empty stored block (5 bytes: `00 00 00 FF FF`), so if this
+                // path is hit repeatedly the compression ratio drops slightly.
+                // It is deliberate: there is no I/O to wait on here, so
+                // returning `Pending` would stall without anything to wake it.
+                // Flushing guarantees forward progress.
                 let flushed = {
                     let this = self.as_mut().get_mut();
                     let (_, _status) = this.do_compress(&[], FlushCompress::Sync)?;
@@ -289,7 +298,15 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for DeflateEncoder<W> {
                     Status::StreamEnd => break,
                     Status::Ok => continue,
                     Status::BufError if produced > 0 => continue,
-                    Status::BufError => break,
+                    // No progress and the output buffer cannot grow further:
+                    // the end-of-stream marker was not written. Fail instead of
+                    // silently finishing a truncated deflate stream (matching
+                    // `poll_write`'s "deflate encoder stalled" behavior).
+                    Status::BufError => {
+                        return Poll::Ready(Err(io::Error::other(
+                            "deflate encoder stalled during shutdown",
+                        )));
+                    }
                 }
             }
 
@@ -440,5 +457,87 @@ mod tests {
             !encoder.get_ref().data.is_empty(),
             "compressed data should be available"
         );
+    }
+
+    /// A writer that returns `Pending` on the `pending_on_call`-th
+    /// `poll_write` (1-based), then succeeds on the retry.
+    struct FlakyWriter {
+        data: Vec<u8>,
+        calls: usize,
+        pending_on_call: usize,
+    }
+
+    impl AsyncWrite for FlakyWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.calls += 1;
+            if self.calls == self.pending_on_call {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.data.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Regression: when the inner writer applies backpressure, the encoder
+    /// must not return `Pending` after it has already consumed input. The
+    /// caller retries with the same buffer, so the bytes would be compressed
+    /// (and emitted) twice, corrupting the deflate stream.
+    #[tokio::test]
+    async fn test_encoder_backpressure_does_not_duplicate_input() {
+        // Incompressible data is required so that a single `poll_write` both
+        // consumes input and produces output (filling the internal buffer).
+        let mut state: u32 = 123_456_789;
+        let data: Vec<u8> = (0..65536)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state & 0xff) as u8
+            })
+            .collect();
+
+        for level in [
+            CompressionLevel::none(),
+            CompressionLevel::fast(),
+            CompressionLevel::default(),
+            CompressionLevel::best(),
+        ] {
+            for pending_on_call in 1..=8 {
+                let mut encoder = DeflateEncoder::new(
+                    FlakyWriter {
+                        data: Vec::new(),
+                        calls: 0,
+                        pending_on_call,
+                    },
+                    level,
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut encoder, &data)
+                    .await
+                    .unwrap();
+                tokio::io::AsyncWriteExt::shutdown(&mut encoder)
+                    .await
+                    .unwrap();
+                let inner = encoder.into_inner();
+
+                let decompressed = decompress(&inner.data, data.len());
+                assert_eq!(
+                    decompressed,
+                    data,
+                    "corrupted stream (level={}, pending_on_call={pending_on_call})",
+                    level.value()
+                );
+            }
+        }
     }
 }

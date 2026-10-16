@@ -5,6 +5,7 @@ use crate::deflate_encoder::DeflateEncoder;
 use crate::error::ZipError;
 use crate::zip_format;
 
+use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -74,11 +75,32 @@ pin_project_lite::pin_project! {
     {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
-            if this.deflate_encoder.is_some() || this.passthrough.is_some() {
-                // finish() was never called — mark the ZipWriter as poisoned
+            // If the writer was not handed back to the `ZipWriter`, the entry
+            // was never completed (dropped or cancelled): poison the archive so
+            // later operations report `Poisoned` rather than silently
+            // continuing. When `finish()` succeeds it stores the writer back
+            // before this runs, so a completed entry is not poisoned.
+            if this.zip.inner.is_none() {
                 this.zip.poisoned = true;
             }
         }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> fmt::Debug for EntryWriter<'_, W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EntryWriter")
+            .field("name", &self.name)
+            .field("is_stored", &self.is_stored)
+            .field("uncompressed_size", &self.uncompressed_size)
+            .field("compressed_size", &self.compressed_size)
+            .field("local_header_offset", &self.local_header_offset)
+            .field("comment_len", &self.comment.as_ref().map(Vec::len))
+            .field(
+                "active",
+                &(self.deflate_encoder.is_some() || self.passthrough.is_some()),
+            )
+            .finish()
     }
 }
 
@@ -150,6 +172,7 @@ impl<W: AsyncWrite + Unpin> EntryWriter<'_, W> {
 
         // Return the inner writer to ZipWriter
         self.zip.inner = Some(inner);
+        self.zip.poisoned = false;
         Ok(())
     }
 }
@@ -179,17 +202,62 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for EntryWriter<'_, W> {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.project();
-        poll_active_writer!(this, cx, poll_shutdown)
+        // Do NOT propagate `shutdown` to the shared archive writer for stored
+        // entries: it would close the archive before the entry's data
+        // descriptor and the central directory are written. `DeflateEncoder`
+        // already avoids this by not forwarding shutdown to its inner writer,
+        // so mirror that here by flushing the passthrough instead.
+        if *this.is_stored {
+            poll_active_writer!(this, cx, poll_flush)
+        } else {
+            poll_active_writer!(this, cx, poll_shutdown)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::CompressionLevel;
     use crate::ZipError;
     use crate::test_utils::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Waker};
     use std::time::SystemTime;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncWrite, AsyncWriteExt};
+
+    /// A writer that stalls (returns `Pending`) while `gate` is closed, and
+    /// otherwise accepts everything. Closing the gate between two operations
+    /// lets a test target exactly which `.await` gets cancelled.
+    #[derive(Debug)]
+    struct GatedWriter {
+        gate: Arc<AtomicBool>,
+        data: Vec<u8>,
+    }
+
+    impl AsyncWrite for GatedWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if !self.gate.load(Ordering::SeqCst) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.data.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn test_entry_mtime_epoch() {
@@ -270,8 +338,7 @@ mod tests {
         let err = zip
             .start_file("another.txt", &EntryOptions::file())
             .await
-            .err()
-            .expect("expected Err, got Ok");
+            .expect_err("expected Err, got Ok");
         assert!(
             matches!(err, ZipError::Poisoned),
             "expected Poisoned, got: {err}"
@@ -281,6 +348,148 @@ mod tests {
         assert!(
             matches!(err, ZipError::Poisoned),
             "expected Poisoned, got: {err}"
+        );
+    }
+
+    /// `shutdown` on a per-entry writer must not shut down the shared archive
+    /// writer, or the data descriptor / central directory would be written to
+    /// an already closed writer.
+    #[tokio::test]
+    async fn test_stored_entry_shutdown_does_not_close_archive() {
+        struct Tracker {
+            shutdown_called: bool,
+            writes_after_shutdown: usize,
+        }
+
+        impl AsyncWrite for Tracker {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if self.shutdown_called {
+                    self.writes_after_shutdown += 1;
+                }
+                Poll::Ready(Ok(buf.len()))
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.shutdown_called = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut zip = ZipWriter::new(Tracker {
+            shutdown_called: false,
+            writes_after_shutdown: 0,
+        })
+        .with_compression_level(CompressionLevel::none());
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(b"hello").await.unwrap();
+        entry.shutdown().await.unwrap();
+        entry.finish().await.unwrap();
+        let tracker = zip.finish().await.unwrap();
+
+        assert_eq!(
+            tracker.writes_after_shutdown, 0,
+            "data descriptor / central directory written after the archive writer was shut down"
+        );
+    }
+
+    /// Poll a future once with a no-op waker and require it to stall.
+    fn poll_once_stalling<F: Future>(fut: &mut Pin<Box<F>>) {
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "operation should stall (writer gate closed)"
+        );
+    }
+
+    /// Dropping a cancelled `start_file` future loses the inner writer; the
+    /// archive must report `Poisoned`, not the misleading `WriterBusy`.
+    #[tokio::test]
+    async fn test_cancelled_start_file_poisons_writer() {
+        let gate = Arc::new(AtomicBool::new(false)); // stall on the LFH
+        let mut zip = ZipWriter::new(GatedWriter {
+            gate,
+            data: Vec::new(),
+        });
+
+        let options = EntryOptions::file();
+        let mut fut = Box::pin(zip.start_file("a.txt", &options));
+        poll_once_stalling(&mut fut);
+        drop(fut); // cancellation
+
+        let err = zip.abort().unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned after cancellation, got {err}"
+        );
+    }
+
+    /// Dropping a cancelled `EntryWriter::finish` (stored path) must poison the
+    /// archive, because `passthrough` was already taken out of the entry.
+    #[tokio::test]
+    async fn test_cancelled_stored_finish_poisons_writer() {
+        let gate = Arc::new(AtomicBool::new(true));
+        let mut zip = ZipWriter::new(GatedWriter {
+            gate: gate.clone(),
+            data: Vec::new(),
+        })
+        .with_compression_level(CompressionLevel::none());
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(b"hello").await.unwrap();
+
+        gate.store(false, Ordering::SeqCst); // stall on the Data Descriptor
+        let mut fut = Box::pin(entry.finish());
+        poll_once_stalling(&mut fut);
+        drop(fut); // cancellation
+
+        let err = zip.finish().await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned after cancellation, got {err}"
+        );
+    }
+
+    /// Same, for the deflated path where the writer is hidden inside the
+    /// deflate encoder's shutdown.
+    #[tokio::test]
+    async fn test_cancelled_deflate_finish_poisons_writer() {
+        let gate = Arc::new(AtomicBool::new(true));
+        let mut zip = ZipWriter::new(GatedWriter {
+            gate: gate.clone(),
+            data: Vec::new(),
+        });
+        let mut entry = zip
+            .start_file("a.txt", &EntryOptions::file())
+            .await
+            .unwrap();
+        entry.write_all(&vec![b'A'; 65536]).await.unwrap();
+
+        gate.store(false, Ordering::SeqCst); // stall on the deflate drain
+        let mut fut = Box::pin(entry.finish());
+        poll_once_stalling(&mut fut);
+        drop(fut); // cancellation
+
+        let err = zip.finish().await.unwrap_err();
+        assert!(
+            matches!(err, ZipError::Poisoned),
+            "expected Poisoned after cancellation, got {err}"
         );
     }
 }

@@ -15,7 +15,7 @@ repository = "https://github.com/sigoden/async-deflate-zip"
 
 [dependencies]
 tokio = { version = "1", features = ["fs", "io-util", "rt"] }
-time = { version = "0.3", features = ["local-offset"] }
+time = { version = "0.3" }
 crc32fast = "1"
 pin-project-lite = "0.2"
 flate2 = "1"
